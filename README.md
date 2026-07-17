@@ -1,4 +1,4 @@
-# A set of utilities for covering Rust projects with specification layer
+# A set of utilities for covering Rust projects with precise specification layer
 
 * `stage1_discovery` builds a nesting graph. Not necessary.
 
@@ -23,7 +23,7 @@
 
 
 ## Example `stage3_annotate` run
-`cargo run --release -- --root /path/to/your/rust/project --api-key <your_api_key>`
+`cargo run --release -- --root /path/to/your/rust/project --api-key <your_api_key> --api_base <your_api_address> --model <your_model>`
 
 ## Notes
 
@@ -34,3 +34,7 @@ The `kilocode_prompts` directory contains system prompts for Kilocode roles. Whe
 When working with a project, I recommend creating a guidebook using the Ask role and keeping it in the project root.
 
 At the beginning of a Kilocode session, it is recommended to add `guidebook.md` to the context.
+
+By default `stage3_annotate` is configured for ~200k token window with temperature 0.0.
+
+Tool also supports `incremental` mode whick tracks changed source files and recirsively rebuilds specs for it and all it's consumers.
