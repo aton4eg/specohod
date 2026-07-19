@@ -61,6 +61,8 @@ fn main() {
 
     let (host, vfs, _workspace) = load_db(&args.manifest);
     let db: &RootDatabase = host.raw_database();
+
+    ra_ap_hir::attach_db(db, || {
     let sema = Semantics::new(db);
 
     for (file_id, _) in vfs.iter() {
@@ -172,6 +174,7 @@ fn main() {
             }
         }
     }
+    });
 }
 
 fn load_db(manifest_path: &Path) -> (AnalysisHost, Vfs, ProjectWorkspace) {
