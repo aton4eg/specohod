@@ -1,4 +1,8 @@
-use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -150,7 +154,7 @@ mod processor {
         code: &str,
         facts: &str,
         ctx: &GenerationContext<'_>,
-        code_hash: &str,   // <-- new parameter
+        code_hash: &str, // <-- new parameter
     ) -> Result<()> {
         let deps = crate::collector::read_dependencies(&module.deps_path)?;
 
@@ -305,7 +309,13 @@ mod processor {
                     module.file_path
                 );
                 generate_via_partial_merge(
-                    module, all_modules, output_path, &code, &facts, ctx, &code_hash,
+                    module,
+                    all_modules,
+                    output_path,
+                    &code,
+                    &facts,
+                    ctx,
+                    &code_hash,
                 )
                 .await
             }
@@ -400,11 +410,17 @@ mod processor {
 }
 
 mod llm {
-    use std::{sync::{Arc, atomic::{AtomicU64, Ordering}}, time::Duration};
+    use std::{
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
     use anyhow::Context;
     use log::info;
-use reqwest::{Client, StatusCode};
+    use reqwest::{Client, StatusCode};
     use serde::{Deserialize, Serialize};
     use tokio::time::sleep;
 
@@ -479,7 +495,7 @@ use reqwest::{Client, StatusCode};
         pub prompt_chars: AtomicU64,
         pub completion_chars: AtomicU64,
     }
-    
+
     pub struct LlmClient {
         config: Config,
         client: Client,
@@ -574,28 +590,57 @@ use reqwest::{Client, StatusCode};
                                         .next()
                                         .map(|c| c.message.content)
                                         .ok_or_else(|| {
-                                            anyhow::anyhow!(                                            "No choices in LLM response")
+                                            anyhow::anyhow!("No choices in LLM response")
                                         })
                                         .map_err(LlmError::Other)?;
                                     // After parsing ChatResponse, inside Ok(response) block
                                     if let Some(usage) = chat_response.usage {
-                                        self.stats.prompt_tokens.fetch_add(usage.prompt_tokens as u64, Ordering::Relaxed);
-                                        self.stats.completion_tokens.fetch_add(usage.completion_tokens as u64, Ordering::Relaxed);
-                                        self.stats.total_tokens.fetch_add(usage.total_tokens as u64, Ordering::Relaxed);
+                                        self.stats.prompt_tokens.fetch_add(
+                                            usage.prompt_tokens as u64,
+                                            Ordering::Relaxed,
+                                        );
+                                        self.stats.completion_tokens.fetch_add(
+                                            usage.completion_tokens as u64,
+                                            Ordering::Relaxed,
+                                        );
+                                        self.stats.total_tokens.fetch_add(
+                                            usage.total_tokens as u64,
+                                            Ordering::Relaxed,
+                                        );
                                     }
                                     // Count characters (can count as string length in bytes or Unicode characters)
-                                    let prompt_len = (system_prompt.len() + user_prompt.len()) as u64;
+                                    let prompt_len =
+                                        (system_prompt.len() + user_prompt.len()) as u64;
                                     let completion_len = content.len() as u64;
-                                    self.stats.prompt_chars.fetch_add(prompt_len, Ordering::Relaxed);
-                                    self.stats.completion_chars.fetch_add(completion_len, Ordering::Relaxed);
+                                    self.stats
+                                        .prompt_chars
+                                        .fetch_add(prompt_len, Ordering::Relaxed);
+                                    self.stats
+                                        .completion_chars
+                                        .fetch_add(completion_len, Ordering::Relaxed);
 
                                     info!("\n=== LLM Cumulative Statistics ===");
-                                    info!("Prompt tokens:   {}", self.stats.prompt_tokens.load(Ordering::Relaxed));
-                                    info!("Completion tokens: {}", self.stats.completion_tokens.load(Ordering::Relaxed));
-                                    info!("Total tokens:    {}", self.stats.total_tokens.load(Ordering::Relaxed));
-                                    info!("Prompt chars:    {}", self.stats.prompt_chars.load(Ordering::Relaxed));
-                                    info!("Completion chars: {}", self.stats.completion_chars.load(Ordering::Relaxed));
-                                    
+                                    info!(
+                                        "Prompt tokens:   {}",
+                                        self.stats.prompt_tokens.load(Ordering::Relaxed)
+                                    );
+                                    info!(
+                                        "Completion tokens: {}",
+                                        self.stats.completion_tokens.load(Ordering::Relaxed)
+                                    );
+                                    info!(
+                                        "Total tokens:    {}",
+                                        self.stats.total_tokens.load(Ordering::Relaxed)
+                                    );
+                                    info!(
+                                        "Prompt chars:    {}",
+                                        self.stats.prompt_chars.load(Ordering::Relaxed)
+                                    );
+                                    info!(
+                                        "Completion chars: {}",
+                                        self.stats.completion_chars.load(Ordering::Relaxed)
+                                    );
+
                                     return Ok(content);
                                 }
                                 Err(parse_err) => {
@@ -636,9 +681,10 @@ use reqwest::{Client, StatusCode};
                             if status_code == 400
                                 && (error_text
                                     .to_lowercase()
-                                    .contains("exceeds the model's maximum context length") || error_text
-                                    .to_lowercase()
-                                    .contains("is longer than the model's context length"))
+                                    .contains("exceeds the model's maximum context length")
+                                    || error_text
+                                        .to_lowercase()
+                                        .contains("is longer than the model's context length"))
                             {
                                 return Err(LlmError::ContextLengthExceeded);
                             }
@@ -917,8 +963,7 @@ fn extract_hash_from_spec(spec_path: &std::path::Path) -> Option<String> {
 /// Writes specification, adding source file hash as first line.
 fn write_spec_with_hash(path: &std::path::Path, spec_body: &str, hash: &str) -> Result<()> {
     let full = format!("<!-- SPEC_HASH: {} -->\n{}", hash, spec_body);
-    std::fs::write(path, full)
-        .with_context(|| format!("Failed to write spec to {:?}", path))?;
+    std::fs::write(path, full).with_context(|| format!("Failed to write spec to {:?}", path))?;
     Ok(())
 }
 
@@ -954,10 +999,7 @@ fn delete_partial_specs(module: &collector::Module) -> Result<()> {
         if !path.is_file() {
             continue;
         }
-        let fname = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let fname = path.file_name().unwrap_or_default().to_string_lossy();
 
         // Partial files have format: {stem}_partial{number}.spec.md
         if fname.ends_with(".spec.md") {
@@ -965,9 +1007,8 @@ fn delete_partial_specs(module: &collector::Module) -> Result<()> {
                 if fname.starts_with::<&str>(stem.as_ref()) {
                     let rest = &fname[stem.len()..];
                     if rest.starts_with(".partial.") {
-                        std::fs::remove_file(&path).with_context(|| {
-                            format!("Failed to remove partial spec {:?}", path)
-                        })?;
+                        std::fs::remove_file(&path)
+                            .with_context(|| format!("Failed to remove partial spec {:?}", path))?;
                         log::info!("Removed partial spec: {:?}", path);
                         break; // don't try to remove file twice
                     }
@@ -1156,11 +1197,26 @@ async fn main() -> Result<()> {
     .await?;
 
     info!("\n=== LLM Cumulative Statistics ===");
-    info!("Prompt tokens:   {}", stats.prompt_tokens.load(Ordering::Relaxed));
-    info!("Completion tokens: {}", stats.completion_tokens.load(Ordering::Relaxed));
-    info!("Total tokens:    {}", stats.total_tokens.load(Ordering::Relaxed));
-    info!("Prompt chars:    {}", stats.prompt_chars.load(Ordering::Relaxed));
-    info!("Completion chars: {}", stats.completion_chars.load(Ordering::Relaxed));
+    info!(
+        "Prompt tokens:   {}",
+        stats.prompt_tokens.load(Ordering::Relaxed)
+    );
+    info!(
+        "Completion tokens: {}",
+        stats.completion_tokens.load(Ordering::Relaxed)
+    );
+    info!(
+        "Total tokens:    {}",
+        stats.total_tokens.load(Ordering::Relaxed)
+    );
+    info!(
+        "Prompt chars:    {}",
+        stats.prompt_chars.load(Ordering::Relaxed)
+    );
+    info!(
+        "Completion chars: {}",
+        stats.completion_chars.load(Ordering::Relaxed)
+    );
 
     info!("All specifications generated successfully");
     Ok(())
