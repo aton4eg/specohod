@@ -94,17 +94,17 @@ pub struct LlmClient {
 }
 
 fn sanitize_prompt(text: &str) -> String {
-    text.split(' ')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<&str>>()
-        .join(" ")
+    text.trim().to_string()
 }
 
 impl LlmClient {
     pub fn new(config: Config, stats: Arc<LlmStats>, semaphore: Arc<Semaphore>) -> Self {
         Self {
             config,
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(300))
+                .build()
+                .expect("Failed to build reqwest Client"),
             stats,
             semaphore,
         }
@@ -241,7 +241,7 @@ impl LlmClient {
                                     &response_text[..response_text.len().min(500)]
                                 );
                                 if attempt < MAX_RETRIES {
-                                    let delay = INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1);
+                                    let delay = (INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1)).min(30_000);
                                     log::info!("Retrying after {} ms...", delay);
                                     sleep(Duration::from_millis(delay)).await;
                                     continue;
@@ -287,7 +287,7 @@ impl LlmClient {
                         ) && attempt < MAX_RETRIES;
 
                         if should_retry {
-                            let delay = INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1);
+                            let delay = (INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1)).min(30_000);
                             log::info!("Retrying after {} ms...", delay);
                             sleep(Duration::from_millis(delay)).await;
                             continue;
@@ -309,7 +309,7 @@ impl LlmClient {
                         e
                     );
                     if attempt < MAX_RETRIES {
-                        let delay = INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1);
+                        let delay = (INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1)).min(30_000);
                         log::info!("Retrying after {} ms...", delay);
                         sleep(Duration::from_millis(delay)).await;
                         continue;

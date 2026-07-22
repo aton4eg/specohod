@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
             prelim_spec: prelim_spec_prompt,
             partial: partial_prompt,
             merge: merge_prompt,
-            spec_template: spec_template,
+            spec_template,
         },
         &llm_config,
         stats.clone(),
