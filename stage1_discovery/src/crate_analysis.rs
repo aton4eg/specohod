@@ -1,8 +1,10 @@
-use crate::types::{CrateInfo, ModuleInfo};
-use crate::utils::read_toml;
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use rayon::prelude::*;
-use std::path::Path;
+
+use crate::types::{CrateInfo, ModuleInfo};
+use crate::utils::read_toml;
 
 pub fn analyze_crate(root: &Path) -> Result<CrateInfo> {
     let cargo = read_toml(&root.join("Cargo.toml")).context("Failed to read crate Cargo.toml")?;

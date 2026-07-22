@@ -1,8 +1,9 @@
-use serde::Serialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-#[derive(Debug, Serialize)]
+use serde::Serialize;
+
+#[derive(Serialize)]
 pub struct ModuleFacts {
     pub module_path: String,
     pub file_path: PathBuf,
@@ -12,7 +13,7 @@ pub struct ModuleFacts {
     pub public_functions: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct ModuleDeps {
     pub module_path: String,
     pub file_path: PathBuf,
@@ -26,7 +27,7 @@ pub struct Dependency {
     pub spec_path: PathBuf,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Serialize, Clone)]
 pub struct StructInfo {
     pub name: String,
     pub fields: String,

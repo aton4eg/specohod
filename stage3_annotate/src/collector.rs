@@ -1,6 +1,7 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 #[derive(Debug, Deserialize)]

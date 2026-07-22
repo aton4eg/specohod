@@ -1,9 +1,11 @@
-use crate::types::WorkspaceGraph;
-use crate::utils::read_toml;
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use glob::glob;
 use rayon::prelude::*;
-use std::path::Path;
+
+use crate::types::WorkspaceGraph;
+use crate::utils::read_toml;
 
 pub fn discover_workspace(root: &Path) -> Result<WorkspaceGraph> {
     let cargo =

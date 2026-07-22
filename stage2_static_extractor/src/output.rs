@@ -1,7 +1,9 @@
-use crate::types::{ModuleDeps, ModuleFacts};
+use std::fs;
+
 use ra_ap_base_db::FileId;
 use ra_ap_vfs::Vfs;
-use std::fs;
+
+use crate::types::{ModuleDeps, ModuleFacts};
 
 pub fn write_facts(vfs: &Vfs, file_id: FileId, facts: &ModuleFacts) {
     let vfs_path = vfs.file_path(file_id);

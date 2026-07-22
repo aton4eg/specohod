@@ -51,7 +51,7 @@ async fn generate_partial_specs_recursive(
         "specification_template",
         ctx.generation.prompts.spec_template.to_string(),
     );
-    let user_prompt = template::render(&ctx.generation.prompts.partial, &vars);
+    let user_prompt = template::render_template(&ctx.generation.prompts.partial, &vars);
 
     match ctx
         .generation
@@ -157,7 +157,7 @@ async fn generate_via_partial_merge(
         "specification_template",
         ctx.prompts.spec_template.to_string(),
     );
-    let user_prompt = template::render(&ctx.prompts.merge, &vars);
+    let user_prompt = template::render_template(&ctx.prompts.merge, &vars);
 
     let merged = ctx.llm.generate(&ctx.prompts.system, &user_prompt).await?;
 
@@ -234,9 +234,9 @@ pub(super) async fn generate_spec(
     );
 
     let user_prompt = if prelim_flag {
-        template::render(&ctx.prompts.prelim_spec, &vars)
+        template::render_template(&ctx.prompts.prelim_spec, &vars)
     } else {
-        template::render(&ctx.prompts.final_spec, &vars)
+        template::render_template(&ctx.prompts.final_spec, &vars)
     };
 
     match ctx.llm.generate(&ctx.prompts.system, &user_prompt).await {
@@ -260,7 +260,7 @@ pub(super) async fn generate_spec(
     }
 }
 
-pub(super) fn count_horizontal_deps(
+pub(super) fn count_horizontal_dependencies(
     module: &Module,
     all_modules: &[Module],
 ) -> Result<usize> {

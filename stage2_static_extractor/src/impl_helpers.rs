@@ -1,10 +1,11 @@
-use crate::signature::function_signature;
-use crate::types::StructInfo;
-use crate::visibility::is_pub;
 use ra_ap_hir::{Adt, ModuleDef, Semantics};
 use ra_ap_syntax::ast;
 
-pub fn impl_self_type_name(
+use crate::signature::format_function_signature;
+use crate::types::StructInfo;
+use crate::visibility::is_pub;
+
+pub fn resolve_impl_self_type_name(
     sema: &Semantics<ra_ap_ide::RootDatabase>,
     current_module: ra_ap_hir::Module,
     self_ty: &ast::Type,
@@ -24,15 +25,15 @@ pub fn impl_self_type_name(
         .then(|| struct_def.name(sema.db).as_str().to_string())
 }
 
-pub fn struct_definition_with_public_methods(
+pub fn enrich_struct_with_public_methods(
     _sema: &Semantics<ra_ap_ide::RootDatabase>,
     i: &ast::Impl,
     s: &mut StructInfo,
 ) {
-    s.methods.extend(public_methods_from_impl(i));
+    s.methods.extend(collect_public_methods_from_impl(i));
 }
 
-pub fn public_methods_from_impl(i: &ast::Impl) -> Vec<String> {
+pub fn collect_public_methods_from_impl(i: &ast::Impl) -> Vec<String> {
     let Some(assoc_list) = i.assoc_item_list() else {
         return Vec::new();
     };
@@ -45,7 +46,7 @@ pub fn public_methods_from_impl(i: &ast::Impl) -> Vec<String> {
         };
 
         if is_pub(&item) {
-            methods.push(function_signature(&item));
+            methods.push(format_function_signature(&item));
         }
     }
 

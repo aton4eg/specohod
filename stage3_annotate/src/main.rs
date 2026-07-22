@@ -12,8 +12,9 @@ use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use clap::Parser;
-use llm::LlmStats;
 use log::info;
+
+use llm::LlmStats;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -64,57 +65,25 @@ struct Args {
     incremental: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    env_logger::init();
-    let args = Args::parse();
-
-    info!("Scanning project at {:?}", args.root);
-    let modules = collector::collect_modules(&args.root)?;
-    info!("Found {} modules", modules.len());
-
-    info!("Building dependency graph");
-    let (graph, node_map) = graph::build_dependency_graph(&modules)?;
-
-    if args.incremental {
-        incremental::incremental_update(&modules, &graph, &node_map)?;
-    }
-
-    info!("Loading templates");
-    let system_prompt = std::fs::read_to_string(&args.system_prompt)?;
-    let final_spec_prompt = std::fs::read_to_string(&args.final_spec_prompt)?;
-    let prelim_spec_prompt = std::fs::read_to_string(&args.prelim_spec_prompt)?;
-    let partial_prompt = std::fs::read_to_string(&args.partial_prompt)?;
-    let merge_prompt = std::fs::read_to_string(&args.merge_prompt)?;
+fn load_prompts(args: &Args) -> Result<processor::Prompts> {
+    let system = std::fs::read_to_string(&args.system_prompt)?;
+    let final_spec = std::fs::read_to_string(&args.final_spec_prompt)?;
+    let prelim_spec = std::fs::read_to_string(&args.prelim_spec_prompt)?;
+    let partial = std::fs::read_to_string(&args.partial_prompt)?;
+    let merge = std::fs::read_to_string(&args.merge_prompt)?;
     let spec_template = std::fs::read_to_string(&args.spec_template)?;
 
-    let llm_config = llm::Config {
-        api_base: args.api_base,
-        api_key: args.api_key,
-        model: args.model,
-        max_tokens: args.max_tokens,
-        temperature: args.temperature,
-    };
+    Ok(processor::Prompts {
+        system,
+        final_spec,
+        prelim_spec,
+        partial,
+        merge,
+        spec_template,
+    })
+}
 
-    let stats = Arc::new(LlmStats::default());
-    info!("Starting spec generation");
-    processor::process_modules(
-        Arc::new(graph),
-        Arc::from(modules),
-        processor::Prompts {
-            system: system_prompt,
-            final_spec: final_spec_prompt,
-            prelim_spec: prelim_spec_prompt,
-            partial: partial_prompt,
-            merge: merge_prompt,
-            spec_template,
-        },
-        &llm_config,
-        stats.clone(),
-        args.concurrency,
-    )
-    .await?;
-
+fn log_llm_stats(stats: &LlmStats) {
     info!("\n=== LLM Cumulative Statistics ===");
     info!(
         "Prompt tokens:   {}",
@@ -136,6 +105,47 @@ async fn main() -> Result<()> {
         "Completion chars: {}",
         stats.completion_chars.load(Ordering::Relaxed)
     );
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::init();
+    let args = Args::parse();
+
+    info!("Scanning project at {:?}", args.root);
+    let modules = collector::collect_modules(&args.root)?;
+    info!("Found {} modules", modules.len());
+
+    info!("Building dependency graph");
+    let (graph, node_map) = graph::build_dependency_graph(&modules)?;
+
+    if args.incremental {
+        incremental::incremental_update(&modules, &graph, &node_map)?;
+    }
+
+    let prompts = load_prompts(&args)?;
+
+    let llm_config = llm::Config {
+        api_base: args.api_base,
+        api_key: args.api_key,
+        model: args.model,
+        max_tokens: args.max_tokens,
+        temperature: args.temperature,
+    };
+
+    let stats = Arc::new(LlmStats::default());
+    info!("Starting spec generation");
+    processor::process_modules(
+        Arc::new(graph),
+        Arc::from(modules),
+        prompts,
+        &llm_config,
+        stats.clone(),
+        args.concurrency,
+    )
+    .await?;
+
+    log_llm_stats(&stats);
 
     info!("All specifications generated successfully");
     Ok(())

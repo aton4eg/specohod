@@ -1,10 +1,11 @@
-use crate::types::StructInfo;
-use crate::visibility::is_pub;
 use ra_ap_hir::Semantics;
 use ra_ap_syntax::ast::HasName;
 use ra_ap_syntax::{AstNode, ast};
 
-pub fn struct_definition_with_public_fields(
+use crate::types::StructInfo;
+use crate::visibility::is_pub;
+
+pub fn extract_struct_definition_with_public_fields(
     _sema: &Semantics<ra_ap_ide::RootDatabase>,
     s: &ast::Struct,
 ) -> Option<StructInfo> {

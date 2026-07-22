@@ -1,9 +1,11 @@
-use crate::types::ModuleInfo;
-use crate::utils::extract_path_attr;
-use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::{fs, hash::Hash, path::Path};
+use std::{fs, path::Path};
+
+use anyhow::{Context, Result};
 use syn::{File, Item, ItemMod};
+
+use crate::types::ModuleInfo;
+use crate::utils::extract_path_attribute;
 
 pub fn analyze_module(
     file_path: &Path,
@@ -16,18 +18,15 @@ pub fn analyze_module(
         .with_context(|| format!("Failed to parse file: {}", file_path.display()))?;
 
     let mut visited = HashMap::new();
-    analyze_module_impl(file_path, crate_name, module_path, &mut visited)
+    analyze_module_recursive(file_path, crate_name, module_path, &mut visited)
 }
 
-fn analyze_module_impl(
+fn analyze_module_recursive(
     file_path: &Path,
     crate_name: &str,
     module_path: Vec<String>,
     visited: &mut HashMap<Vec<String>, ModuleInfo>,
-) -> Result<ModuleInfo>
-where
-    Vec<String>: Hash + Eq,
-{
+) -> Result<ModuleInfo> {
     let key = module_path.clone();
     if let Some(cached) = visited.get(&key) {
         return Ok(cached.clone());
@@ -124,9 +123,9 @@ fn process_module_queue(
             .parent()
             .context("Module file has no parent directory")?;
 
-        let path_attr = extract_path_attr(&item_mod.attrs);
+        let path_attr_value = extract_path_attribute(&item_mod.attrs);
 
-        let file_path = if let Some(custom) = path_attr {
+        let file_path = if let Some(custom) = path_attr_value {
             base_dir.join(custom)
         } else {
             let file1 = base_dir.join(format!("{}.rs", name));
@@ -137,7 +136,7 @@ fn process_module_queue(
 
         if file_path.exists() {
             let external_module =
-                analyze_module_impl(&file_path, crate_name, current_path, visited)?;
+                analyze_module_recursive(&file_path, crate_name, current_path, visited)?;
             parent_submodules.push(external_module);
         }
     }

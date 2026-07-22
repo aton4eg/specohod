@@ -1,10 +1,8 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
 };
+use std::time::Duration;
 
 use anyhow::Context;
 use log::info;
@@ -97,6 +95,11 @@ fn sanitize_prompt(text: &str) -> String {
     text.trim().to_string()
 }
 
+fn compute_retry_delay_ms(attempt: u32) -> u64 {
+    const INITIAL_BACKOFF_MS: u64 = 1000;
+    (INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1)).min(30_000)
+}
+
 impl LlmClient {
     pub fn new(config: Config, stats: Arc<LlmStats>, semaphore: Arc<Semaphore>) -> Self {
         Self {
@@ -110,14 +113,192 @@ impl LlmClient {
         }
     }
 
+    fn update_usage_stats(&self, usage: Option<Usage>, prompt_len: u64, completion_len: u64) {
+        if let Some(usage) = usage {
+            self.stats
+                .prompt_tokens
+                .fetch_add(usage.prompt_tokens as u64, Ordering::Relaxed);
+            self.stats
+                .completion_tokens
+                .fetch_add(usage.completion_tokens as u64, Ordering::Relaxed);
+            self.stats
+                .total_tokens
+                .fetch_add(usage.total_tokens as u64, Ordering::Relaxed);
+        }
+        self.stats
+            .prompt_chars
+            .fetch_add(prompt_len, Ordering::Relaxed);
+        self.stats
+            .completion_chars
+            .fetch_add(completion_len, Ordering::Relaxed);
+    }
+
+    fn log_cumulative_stats(&self) {
+        info!("\n=== LLM Cumulative Statistics ===");
+        info!(
+            "Prompt tokens:   {}",
+            self.stats.prompt_tokens.load(Ordering::Relaxed)
+        );
+        info!(
+            "Completion tokens: {}",
+            self.stats.completion_tokens.load(Ordering::Relaxed)
+        );
+        info!(
+            "Total tokens:    {}",
+            self.stats.total_tokens.load(Ordering::Relaxed)
+        );
+        info!(
+            "Prompt chars:    {}",
+            self.stats.prompt_chars.load(Ordering::Relaxed)
+        );
+        info!(
+            "Completion chars: {}",
+            self.stats.completion_chars.load(Ordering::Relaxed)
+        );
+    }
+
+    async fn send_request(
+        &self,
+        url: &str,
+        request: &ChatRequest,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        self.client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .json(request)
+            .send()
+            .await
+    }
+
+    async fn parse_success_response(
+        &self,
+        response_text: String,
+        system_prompt_len: usize,
+        user_prompt_len: usize,
+    ) -> std::result::Result<String, LlmError> {
+        let chat_response: ChatResponse = serde_json::from_str(&response_text).map_err(|e| {
+            LlmError::Other(anyhow::anyhow!("Failed to parse LLM response: {}. Body: {}", e, response_text))
+        })?;
+
+        let content = chat_response
+            .choices
+            .into_iter()
+            .next()
+            .map(|c| c.message.content)
+            .ok_or_else(|| LlmError::Other(anyhow::anyhow!("No choices in LLM response")))?;
+
+        let prompt_len = (system_prompt_len + user_prompt_len) as u64;
+        let completion_len = content.len() as u64;
+        self.update_usage_stats(chat_response.usage, prompt_len, completion_len);
+        self.log_cumulative_stats();
+
+        Ok(content)
+    }
+
+    async fn handle_retry_loop(
+        &self,
+        url: String,
+        request: ChatRequest,
+        system_prompt_len: usize,
+        user_prompt_len: usize,
+    ) -> std::result::Result<String, LlmError> {
+        const MAX_RETRIES: u32 = 8;
+
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let response_result = self.send_request(&url, &request).await;
+
+            match response_result {
+                Ok(response) => {
+                    let status = response.status();
+                    Self::log_rate_limits(&response);
+
+                    if status.is_success() {
+                        let response_text = response
+                            .text()
+                            .await
+                            .context("Failed to read response body")
+                            .map_err(LlmError::Other)?;
+                        return self
+                            .parse_success_response(response_text, system_prompt_len, user_prompt_len)
+                            .await;
+                    }
+
+                    let error_text = response.text().await.unwrap_or_default();
+                    log::warn!(
+                        "LLM request failed (attempt {}/{}): status {}, body: {}",
+                        attempt, MAX_RETRIES, status.as_u16(), error_text,
+                    );
+
+                    if status == StatusCode::BAD_REQUEST
+                        && Self::is_context_length_error(&error_text)
+                    {
+                        return Err(LlmError::ContextLengthExceeded);
+                    }
+
+                    if Self::is_retryable_status(status) && attempt < MAX_RETRIES {
+                        let delay = compute_retry_delay_ms(attempt);
+                        log::info!("Retrying after {} ms...", delay);
+                        sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+
+                    return Err(LlmError::Other(anyhow::anyhow!(
+                        "LLM API error after {} attempts: {} - {}",
+                        attempt, status, error_text,
+                    )));
+                }
+                Err(e) => {
+                    log::warn!(
+                        "LLM request network error (attempt {}/{}): {}",
+                        attempt, MAX_RETRIES, e,
+                    );
+                    if attempt < MAX_RETRIES {
+                        let delay = compute_retry_delay_ms(attempt);
+                        log::info!("Retrying after {} ms...", delay);
+                        sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    return Err(LlmError::Other(
+                        anyhow::Error::new(e).context("LLM request failed after retries"),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn log_rate_limits(response: &reqwest::Response) {
+        if let Some(remaining) = response.headers().get("x-ratelimit-remaining-requests") {
+            log::debug!("RateLimit remaining requests: {:?}", remaining);
+        }
+        if let Some(remaining_tokens) = response.headers().get("x-ratelimit-remaining-tokens") {
+            log::debug!("RateLimit remaining tokens: {:?}", remaining_tokens);
+        }
+    }
+
+    fn is_context_length_error(error_text: &str) -> bool {
+        let lower = error_text.to_lowercase();
+        lower.contains("exceeds the model's maximum context length")
+            || lower.contains("is longer than the model's context length")
+    }
+
+    fn is_retryable_status(status: StatusCode) -> bool {
+        matches!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS
+                | StatusCode::INTERNAL_SERVER_ERROR
+                | StatusCode::BAD_GATEWAY
+                | StatusCode::SERVICE_UNAVAILABLE
+                | StatusCode::GATEWAY_TIMEOUT
+        )
+    }
+
     pub async fn generate(
         &self,
         system_prompt: &str,
         user_prompt: &str,
     ) -> std::result::Result<String, LlmError> {
-        const MAX_RETRIES: u32 = 8;
-        const INITIAL_BACKOFF_MS: u64 = 1000;
-
         let _permit = self
             .semaphore
             .acquire()
@@ -130,196 +311,26 @@ impl LlmClient {
         );
         let system_prompt = sanitize_prompt(system_prompt);
         let user_prompt = sanitize_prompt(user_prompt);
+        let system_prompt_len = system_prompt.len();
+        let user_prompt_len = user_prompt.len();
 
         let request = ChatRequest {
             model: self.config.model.clone(),
             messages: vec![
                 ChatMessage {
                     role: "system".to_string(),
-                    content: system_prompt.to_string(),
+                    content: system_prompt,
                 },
                 ChatMessage {
                     role: "user".to_string(),
-                    content: user_prompt.to_string(),
+                    content: user_prompt,
                 },
             ],
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
         };
 
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
-            let response_result = self
-                .client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.config.api_key))
-                .json(&request)
-                .send()
-                .await;
-
-            match response_result {
-                Ok(response) => {
-                    let status = response.status();
-                    if let Some(remaining) =
-                        response.headers().get("x-ratelimit-remaining-requests")
-                    {
-                        log::debug!("RateLimit remaining requests: {:?}", remaining);
-                    }
-                    if let Some(remaining_tokens) =
-                        response.headers().get("x-ratelimit-remaining-tokens")
-                    {
-                        log::debug!("RateLimit remaining tokens: {:?}", remaining_tokens);
-                    }
-
-                    if status.is_success() {
-                        let response_text = response
-                            .text()
-                            .await
-                            .context("Failed to read response body")
-                            .map_err(LlmError::Other)?;
-                        match serde_json::from_str::<ChatResponse>(&response_text) {
-                            Ok(chat_response) => {
-                                let content = chat_response
-                                    .choices
-                                    .into_iter()
-                                    .next()
-                                    .map(|c| c.message.content)
-                                    .ok_or_else(|| anyhow::anyhow!("No choices in LLM response"))
-                                    .map_err(LlmError::Other)?;
-                                if let Some(usage) = chat_response.usage {
-                                    self.stats
-                                        .prompt_tokens
-                                        .fetch_add(usage.prompt_tokens as u64, Ordering::Relaxed);
-                                    self.stats.completion_tokens.fetch_add(
-                                        usage.completion_tokens as u64,
-                                        Ordering::Relaxed,
-                                    );
-                                    self.stats
-                                        .total_tokens
-                                        .fetch_add(usage.total_tokens as u64, Ordering::Relaxed);
-                                }
-                                let prompt_len = (system_prompt.len() + user_prompt.len()) as u64;
-                                let completion_len = content.len() as u64;
-                                self.stats
-                                    .prompt_chars
-                                    .fetch_add(prompt_len, Ordering::Relaxed);
-                                self.stats
-                                    .completion_chars
-                                    .fetch_add(completion_len, Ordering::Relaxed);
-
-                                info!("\n=== LLM Cumulative Statistics ===");
-                                info!(
-                                    "Prompt tokens:   {}",
-                                    self.stats.prompt_tokens.load(Ordering::Relaxed)
-                                );
-                                info!(
-                                    "Completion tokens: {}",
-                                    self.stats.completion_tokens.load(Ordering::Relaxed)
-                                );
-                                info!(
-                                    "Total tokens:    {}",
-                                    self.stats.total_tokens.load(Ordering::Relaxed)
-                                );
-                                info!(
-                                    "Prompt chars:    {}",
-                                    self.stats.prompt_chars.load(Ordering::Relaxed)
-                                );
-                                info!(
-                                    "Completion chars: {}",
-                                    self.stats.completion_chars.load(Ordering::Relaxed)
-                                );
-
-                                return Ok(content);
-                            }
-                            Err(parse_err) => {
-                                log::warn!(
-                                    "Failed to parse LLM response (attempt {}/{}): {}. Raw body: {}",
-                                    attempt,
-                                    MAX_RETRIES,
-                                    parse_err,
-                                    &response_text[..response_text.len().min(500)]
-                                );
-                                if attempt < MAX_RETRIES {
-                                    let delay = (INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1)).min(30_000);
-                                    log::info!("Retrying after {} ms...", delay);
-                                    sleep(Duration::from_millis(delay)).await;
-                                    continue;
-                                } else {
-                                    return Err(LlmError::Other(anyhow::anyhow!(
-                                        "Failed to parse LLM response after {} attempts: {}\nBody: {}",
-                                        attempt,
-                                        parse_err,
-                                        response_text
-                                    )));
-                                }
-                            }
-                        }
-                    } else {
-                        let status_code = status.as_u16();
-                        let error_text = response.text().await.unwrap_or_default();
-                        log::warn!(
-                            "LLM request failed (attempt {}/{}): status {}, body: {}",
-                            attempt,
-                            MAX_RETRIES,
-                            status_code,
-                            error_text
-                        );
-
-                        if status_code == 400
-                            && (error_text
-                                .to_lowercase()
-                                .contains("exceeds the model's maximum context length")
-                                || error_text
-                                    .to_lowercase()
-                                    .contains("is longer than the model's context length"))
-                        {
-                            return Err(LlmError::ContextLengthExceeded);
-                        }
-
-                        let should_retry = matches!(
-                            status,
-                            StatusCode::TOO_MANY_REQUESTS
-                                | StatusCode::INTERNAL_SERVER_ERROR
-                                | StatusCode::BAD_GATEWAY
-                                | StatusCode::SERVICE_UNAVAILABLE
-                                | StatusCode::GATEWAY_TIMEOUT
-                        ) && attempt < MAX_RETRIES;
-
-                        if should_retry {
-                            let delay = (INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1)).min(30_000);
-                            log::info!("Retrying after {} ms...", delay);
-                            sleep(Duration::from_millis(delay)).await;
-                            continue;
-                        } else {
-                            return Err(LlmError::Other(anyhow::anyhow!(
-                                "LLM API error after {} attempts: {} - {}",
-                                attempt,
-                                status,
-                                error_text
-                            )));
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::warn!(
-                        "LLM request network error (attempt {}/{}): {}",
-                        attempt,
-                        MAX_RETRIES,
-                        e
-                    );
-                    if attempt < MAX_RETRIES {
-                        let delay = (INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1)).min(30_000);
-                        log::info!("Retrying after {} ms...", delay);
-                        sleep(Duration::from_millis(delay)).await;
-                        continue;
-                    } else {
-                        return Err(LlmError::Other(
-                            anyhow::Error::new(e).context("LLM request failed after retries"),
-                        ));
-                    }
-                }
-            }
-        }
+        self.handle_retry_loop(url, request, system_prompt_len, user_prompt_len)
+            .await
     }
 }

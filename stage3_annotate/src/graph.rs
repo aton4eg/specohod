@@ -9,7 +9,7 @@ use petgraph::graph::{DiGraph, NodeIndex};
 
 use crate::collector::{self, Module};
 
-pub fn topological_sccs(graph: &DiGraph<PathBuf, ()>) -> Vec<Vec<NodeIndex>> {
+pub fn compute_topological_sccs(graph: &DiGraph<PathBuf, ()>) -> Vec<Vec<NodeIndex>> {
     tarjan_scc(graph)
 }
 

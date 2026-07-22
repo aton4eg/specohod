@@ -57,7 +57,7 @@ async fn process_scc(
 
     let mut ordered_modules: Vec<(&Module, usize)> = Vec::new();
     for m in scc_modules {
-        let count = generator::count_horizontal_deps(m, modules)?;
+        let count = generator::count_horizontal_dependencies(m, modules)?;
         ordered_modules.push((m, count));
     }
     ordered_modules.sort_by_key(|(_, cnt)| *cnt);
@@ -134,7 +134,7 @@ pub async fn process_modules(
         llm,
     });
 
-    let sccs = crate::graph::topological_sccs(&graph);
+    let sccs = crate::graph::compute_topological_sccs(&graph);
     let total = sccs.len();
     if total == 0 {
         return Ok(());

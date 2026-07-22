@@ -1,11 +1,13 @@
-use crate::path_helpers::canonical_path;
-use crate::types::{Dependency, ModuleDeps};
-use crate::visibility::is_inside_test_module;
+use std::path::Path;
+use std::path::PathBuf;
+
 use ra_ap_hir::{ModuleDef, Semantics};
 use ra_ap_syntax::{AstNode, ast};
 use ra_ap_vfs::{AbsPath, Vfs};
-use std::path::Path;
-use std::path::PathBuf;
+
+use crate::path_helpers::get_canonical_path;
+use crate::types::{Dependency, ModuleDeps};
+use crate::visibility::is_inside_test_module;
 
 pub fn collect_external_paths(
     sema: &Semantics<ra_ap_ide::RootDatabase>,
@@ -23,11 +25,11 @@ pub fn collect_external_paths(
         && let Some(ra_ap_hir::PathResolution::Def(def)) = sema.resolve_path(&path)
     {
         // Get the definition file path
-        if let Some(file_path) = file_path_for_def(sema, vfs, def) {
+        if let Some(file_path) = get_file_path_for_def(sema, vfs, def) {
             // Check if file is inside workspace
             if file_path.starts_with(workspace_root)
                 && current_path != file_path
-                && let Some(mod_path) = canonical_path(sema, def)
+                && let Some(mod_path) = get_canonical_path(sema, def)
             {
                 let mut spec_path = file_path.clone();
                 spec_path.add_extension("spec.md");
@@ -41,10 +43,10 @@ pub fn collect_external_paths(
     }
     if let Some(module) = ast::Module::cast(node.clone())
         && let Some(hir_module) = sema.to_module_def(&module)
-        && let Some(file_path) = file_path_for_module(sema, vfs, hir_module)
+        && let Some(file_path) = get_file_path_for_module(sema, vfs, hir_module)
         && file_path.starts_with(workspace_root)
         && current_path != file_path
-        && let Some(mod_path) = canonical_path(sema, ModuleDef::Module(hir_module))
+        && let Some(mod_path) = get_canonical_path(sema, ModuleDef::Module(hir_module))
     {
         let mut spec_path = file_path.clone();
         spec_path.add_extension("spec.md");
@@ -59,7 +61,7 @@ pub fn collect_external_paths(
     }
 }
 
-pub fn file_path_for_module(
+pub fn get_file_path_for_module(
     sema: &Semantics<ra_ap_ide::RootDatabase>,
     vfs: &Vfs,
     module: ra_ap_hir::Module,
@@ -73,7 +75,7 @@ pub fn file_path_for_module(
     }
 }
 
-pub fn file_path_for_def(
+pub fn get_file_path_for_def(
     sema: &Semantics<ra_ap_ide::RootDatabase>,
     vfs: &Vfs,
     def: ModuleDef,
@@ -88,5 +90,5 @@ pub fn file_path_for_def(
         ModuleDef::TypeAlias(ta) => ta.module(sema.db),
         _ => return None,
     };
-    file_path_for_module(sema, vfs, module)
+    get_file_path_for_module(sema, vfs, module)
 }

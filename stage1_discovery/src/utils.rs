@@ -1,5 +1,6 @@
-use anyhow::{Context, Result};
 use std::{fs, path::Path};
+
+use anyhow::{Context, Result};
 
 pub fn read_toml(path: &Path) -> Result<toml::Value> {
     let content = fs::read_to_string(path)
@@ -7,7 +8,7 @@ pub fn read_toml(path: &Path) -> Result<toml::Value> {
     toml::from_str(&content).context("Failed to parse TOML content")
 }
 
-pub fn extract_path_attr(attrs: &[syn::Attribute]) -> Option<String> {
+pub fn extract_path_attribute(attrs: &[syn::Attribute]) -> Option<String> {
     attrs.iter().find_map(|attr| {
         if attr.path().is_ident("path")
             && let syn::Meta::NameValue(meta) = &attr.meta

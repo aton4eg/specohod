@@ -1,10 +1,11 @@
+use std::path::Path;
+
 use ra_ap_ide::AnalysisHost;
 use ra_ap_load_cargo::{LoadCargoConfig, ProcMacroServerChoice, load_workspace};
 use ra_ap_paths::Utf8PathBuf;
 use ra_ap_project_model::{ProjectManifest, ProjectWorkspace};
 use ra_ap_vfs::{AbsPathBuf, Vfs};
 use rustc_hash::FxHashMap;
-use std::path::Path;
 
 pub fn load_db(manifest_path: &Path) -> (AnalysisHost, Vfs, ProjectWorkspace) {
     let utf8 = Utf8PathBuf::from(manifest_path.to_string_lossy().to_string());
