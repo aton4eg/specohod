@@ -1,55 +1,32 @@
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+mod args;
+mod collect;
+mod database;
+mod impl_helpers;
+mod output;
+mod path_helpers;
+mod signature;
+mod struct_parser;
+mod types;
+mod visibility;
 
-use clap::Parser;
-use ra_ap_hir::{Adt, EditionedFileId, ModuleDef, Semantics};
-use ra_ap_ide::{AnalysisHost, RootDatabase};
-use ra_ap_load_cargo::{LoadCargoConfig, ProcMacroServerChoice, load_workspace};
-use ra_ap_paths::Utf8PathBuf;
-use ra_ap_project_model::{ProjectManifest, ProjectWorkspace};
-use ra_ap_syntax::ast::{HasAttrs, HasModuleItem, HasName};
+use ra_ap_hir::{EditionedFileId, Semantics};
+use ra_ap_ide::RootDatabase;
+use ra_ap_syntax::ast::{HasModuleItem, HasName};
 use ra_ap_syntax::{AstNode, ast};
-use ra_ap_vfs::{AbsPath, AbsPathBuf, Vfs};
-use rustc_hash::FxHashMap;
-use serde::Serialize;
+use ra_ap_vfs::AbsPath;
+use std::collections::{HashMap, HashSet};
 
-#[derive(Parser)]
-struct Args {
-    #[arg(short, long)]
-    manifest: PathBuf,
-}
-
-#[derive(Debug, Serialize)]
-struct ModuleFacts {
-    module_path: String,
-    file_path: PathBuf,
-    public_structs: Vec<StructInfo>,
-    public_enums: Vec<String>,
-    public_traits: Vec<String>,
-    public_functions: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ModuleDeps {
-    module_path: String,
-    file_path: PathBuf,
-    dependency: HashSet<Dependency>,
-}
-
-#[derive(Debug, Serialize, Hash, Eq, PartialEq)]
-struct Dependency {
-    module_path: String,
-    file_path: PathBuf,
-    spec_path: PathBuf,
-}
-
-#[derive(Debug, Serialize, Clone)]
-struct StructInfo {
-    name: String,
-    fields: String,
-    methods: Vec<String>,
-}
+use args::Args;
+use clap::Parser;
+use collect::collect_external_paths;
+use database::load_db;
+use impl_helpers::{
+    impl_self_type_name, public_methods_from_impl, struct_definition_with_public_methods,
+};
+use output::{write_deps, write_facts};
+use struct_parser::struct_definition_with_public_fields;
+use types::{ModuleDeps, ModuleFacts, StructInfo};
+use visibility::is_pub;
 
 fn main() {
     let args = Args::parse();
@@ -113,13 +90,17 @@ fn main() {
                     dependency: HashSet::new(),
                 };
 
+                let utf8_path =
+                    ra_ap_paths::Utf8PathBuf::from_path_buf(std::path::PathBuf::from(file_path))
+                        .unwrap();
+                let abs_path = AbsPath::assert(utf8_path.as_path());
                 collect_external_paths(
                     &sema,
                     &vfs,
                     &workspace_root,
                     &mut deps,
                     tree.syntax(),
-                    file_path,
+                    abs_path,
                 );
 
                 for item in tree.items() {
@@ -160,7 +141,9 @@ fn main() {
                             facts.public_traits.push(t.to_string());
                         }
                         ast::Item::Fn(f) if is_pub(&f) => {
-                            facts.public_functions.push(function_signature(&f));
+                            facts
+                                .public_functions
+                                .push(signature::function_signature(&f));
                         }
                         _ => {}
                     }
@@ -175,317 +158,4 @@ fn main() {
             }
         }
     });
-}
-
-fn load_db(manifest_path: &Path) -> (AnalysisHost, Vfs, ProjectWorkspace) {
-    let utf8 = Utf8PathBuf::from(manifest_path.to_string_lossy().to_string());
-    let abs = AbsPathBuf::assert(utf8);
-    let manifest = ProjectManifest::discover_single(&abs).unwrap();
-    let workspace = ProjectWorkspace::load(manifest, &Default::default(), &move |_| {}).unwrap();
-
-    let config = LoadCargoConfig {
-        load_out_dirs_from_check: true,
-        with_proc_macro_server: ProcMacroServerChoice::Sysroot,
-        prefill_caches: false,
-        num_worker_threads: 4,
-        proc_macro_processes: 4,
-    };
-    let extra_env = FxHashMap::default();
-    let (db, vfs, _proc_macro) = load_workspace(workspace.clone(), &extra_env, &config).unwrap();
-    let host = AnalysisHost::with_database(db);
-    (host, vfs, workspace)
-}
-
-fn is_pub<N: ast::HasVisibility>(node: &N) -> bool {
-    if let Some(vis) = node.visibility() {
-        matches!(
-            vis.kind(),
-            ast::VisibilityKind::Pub
-                | ast::VisibilityKind::PubCrate
-                | ast::VisibilityKind::PubSuper
-        )
-    } else {
-        false
-    }
-}
-
-fn write_facts(vfs: &Vfs, file_id: ra_ap_base_db::FileId, facts: &ModuleFacts) {
-    let vfs_path = vfs.file_path(file_id);
-    let path = match vfs_path.as_path() {
-        Some(p) => p.to_path_buf(),
-        None => return,
-    };
-    let file_stem = match path.file_stem() {
-        Some(s) => s.to_string(),
-        None => return,
-    };
-    let parent = match path.parent() {
-        Some(p) => p,
-        None => return,
-    };
-    let output = parent.join(format!("{}.facts.json", file_stem));
-    let json = serde_json::to_string_pretty(facts).unwrap();
-    let _ = fs::write(output, json);
-}
-
-fn write_deps(vfs: &Vfs, file_id: ra_ap_base_db::FileId, deps: &ModuleDeps) {
-    let vfs_path = vfs.file_path(file_id);
-    let path = match vfs_path.as_path() {
-        Some(p) => p.to_path_buf(),
-        None => return,
-    };
-    let file_stem = match path.file_stem() {
-        Some(s) => s.to_string(),
-        None => return,
-    };
-    let parent = match path.parent() {
-        Some(p) => p,
-        None => return,
-    };
-    let output = parent.join(format!("{}.deps.json", file_stem));
-    let json = serde_json::to_string_pretty(deps).unwrap();
-    let _ = fs::write(output, json);
-}
-
-fn struct_definition_with_public_fields(
-    _sema: &Semantics<RootDatabase>,
-    s: &ast::Struct,
-) -> Option<StructInfo> {
-    let mut public_struct_info = StructInfo {
-        name: s.name()?.to_string(),
-        fields: "".to_string(),
-        methods: Vec::new(),
-    };
-    let mut public_fields = Vec::new();
-
-    match s.field_list() {
-        Some(ast::FieldList::RecordFieldList(field_list)) => {
-            for field in field_list.fields() {
-                if is_pub(&field) {
-                    public_fields.push(field.syntax().text().to_string());
-                }
-            }
-        }
-        Some(ast::FieldList::TupleFieldList(field_list)) => {
-            for field in field_list.fields() {
-                if is_pub(&field) {
-                    public_fields.push(field.syntax().text().to_string());
-                }
-            }
-        }
-        None => {}
-    }
-    public_struct_info.fields = public_fields.join(", ");
-    Some(public_struct_info)
-
-    //Some(format!("pub struct {}{}{{{}}};", name, generics, public_fields.join(", ")))
-}
-
-fn collect_external_paths(
-    sema: &Semantics<RootDatabase>,
-    vfs: &Vfs,
-    workspace_root: &Path,
-    deps: &mut ModuleDeps,
-    node: &ra_ap_syntax::SyntaxNode,
-    current_module: &AbsPath,
-) {
-    let current_path: PathBuf = current_module.into();
-    if is_inside_test_module(node) {
-        return; // completely ignore this AST branch
-    }
-    if let Some(path) = ast::Path::cast(node.clone())
-        && let Some(ra_ap_hir::PathResolution::Def(def)) = sema.resolve_path(&path)
-    {
-        // Get the definition file path
-        if let Some(file_path) = file_path_for_def(sema, vfs, def) {
-            // Check if file is inside workspace
-            if file_path.starts_with(workspace_root)
-                && current_path != file_path
-                && let Some(mod_path) = canonical_path(sema, def)
-            {
-                let mut spec_path = file_path.clone();
-                spec_path.add_extension("spec.md");
-                deps.dependency.insert(Dependency {
-                    module_path: mod_path,
-                    file_path,
-                    spec_path,
-                });
-            }
-        }
-    }
-    if let Some(module) = ast::Module::cast(node.clone())
-        && let Some(hir_module) = sema.to_module_def(&module)
-        && let Some(file_path) = file_path_for_module(sema, vfs, hir_module)
-        && file_path.starts_with(workspace_root)
-        && current_path != file_path
-        && let Some(mod_path) = canonical_path(sema, ModuleDef::Module(hir_module))
-    {
-        let mut spec_path = file_path.clone();
-        spec_path.add_extension("spec.md");
-        deps.dependency.insert(Dependency {
-            module_path: mod_path,
-            file_path,
-            spec_path,
-        });
-    }
-    for child in node.children() {
-        collect_external_paths(sema, vfs, workspace_root, deps, &child, current_module);
-    }
-}
-
-fn file_path_for_module(
-    sema: &Semantics<RootDatabase>,
-    vfs: &Vfs,
-    module: ra_ap_hir::Module,
-) -> Option<PathBuf> {
-    let db = sema.db;
-    if let Some(file_id) = module.as_source_file_id(db) {
-        let vfs_path = vfs.file_path(file_id.file_id(db));
-        vfs_path.as_path().map(|p| p.into())
-    } else {
-        None
-    }
-}
-
-fn file_path_for_def(sema: &Semantics<RootDatabase>, vfs: &Vfs, def: ModuleDef) -> Option<PathBuf> {
-    let module = match def {
-        ModuleDef::Module(m) => m,
-        ModuleDef::Adt(adt) => adt.module(sema.db),
-        ModuleDef::Trait(t) => t.module(sema.db),
-        ModuleDef::Function(f) => f.module(sema.db),
-        ModuleDef::Const(c) => c.module(sema.db),
-        ModuleDef::Static(s) => s.module(sema.db),
-        ModuleDef::TypeAlias(ta) => ta.module(sema.db),
-        _ => return None,
-    };
-    file_path_for_module(sema, vfs, module)
-}
-
-fn absolute_module_path(sema: &Semantics<RootDatabase>, module: ra_ap_hir::Module) -> String {
-    let db = sema.db;
-    let mut segments = Vec::new();
-    for m in module.path_to_root(db).into_iter().rev() {
-        if let Some(name) = m.name(db) {
-            segments.push(name.as_str().to_string());
-        } else {
-            segments.push(
-                m.krate(db)
-                    .display_name(db)
-                    .unwrap()
-                    .crate_name()
-                    .to_string(),
-            );
-        }
-    }
-    if segments.is_empty() {
-        "missing".to_string()
-    } else {
-        segments.join("::")
-    }
-}
-
-fn canonical_path(sema: &Semantics<RootDatabase>, def: ModuleDef) -> Option<String> {
-    let db = sema.db;
-    match def {
-        ModuleDef::Module(m) => Some(absolute_module_path(sema, m)),
-        ModuleDef::Adt(adt) => match adt {
-            Adt::Struct(s) => Some(absolute_module_path(sema, s.module(db))),
-            Adt::Enum(e) => Some(absolute_module_path(sema, e.module(db))),
-            Adt::Union(u) => Some(absolute_module_path(sema, u.module(db))),
-        },
-        ModuleDef::Trait(t) => Some(absolute_module_path(sema, t.module(db))),
-        ModuleDef::Function(f) => Some(absolute_module_path(sema, f.module(db))),
-        _ => None,
-    }
-}
-
-fn function_signature(f: &ast::Fn) -> String {
-    let mut parts = Vec::new();
-    for child in f.syntax().children() {
-        // Skip attributes, they are not part of signature
-        if ast::Attr::can_cast(child.kind()) {
-            continue;
-        }
-        // Stop when we reach the function body
-        if ast::BlockExpr::can_cast(child.kind()) {
-            break;
-        }
-        parts.push(child.text().to_string());
-    }
-    parts.join(" ")
-}
-
-fn impl_self_type_name(
-    sema: &Semantics<RootDatabase>,
-    current_module: ra_ap_hir::Module,
-    self_ty: &ast::Type,
-) -> Option<String> {
-    let ast::Type::PathType(path_ty) = self_ty else {
-        return None;
-    };
-
-    let path = path_ty.path()?;
-    let ra_ap_hir::PathResolution::Def(ModuleDef::Adt(Adt::Struct(struct_def))) =
-        sema.resolve_path(&path)?
-    else {
-        return None;
-    };
-
-    (struct_def.module(sema.db) == current_module)
-        .then(|| struct_def.name(sema.db).as_str().to_string())
-}
-
-fn is_inside_test_module(node: &ra_ap_syntax::SyntaxNode) -> bool {
-    let mut current = node.clone();
-    while let Some(parent) = current.parent() {
-        if let Some(module) = ast::Module::cast(parent.clone()) {
-            if let Some(name) = module.name()
-                && (name.text() == "test" || name.text() == "tests")
-            {
-                return true;
-            }
-            for attr in module.attrs() {
-                if let Some(path) = attr.path()
-                    && path.syntax().text() == "cfg"
-                {
-                    let text = attr.syntax().text().to_string();
-                    if text.contains("test") || text.contains("tests") {
-                        return true;
-                    }
-                }
-            }
-        }
-        current = parent; // now parent is not moved above
-    }
-    false
-}
-
-fn struct_definition_with_public_methods(
-    _sema: &Semantics<RootDatabase>,
-    i: &ast::Impl,
-    s: &mut StructInfo,
-) {
-    s.methods.extend(public_methods_from_impl(i));
-}
-
-fn public_methods_from_impl(i: &ast::Impl) -> Vec<String> {
-    let Some(assoc_list) = i.assoc_item_list() else {
-        return Vec::new();
-    };
-
-    let mut methods = Vec::new();
-    for item in assoc_list.assoc_items() {
-        let item = match item {
-            ast::AssocItem::Fn(f) => f,
-            _ => continue,
-        };
-
-        if is_pub(&item) {
-            methods.push(function_signature(&item));
-        }
-    }
-
-    methods
-
-    //Some(format!("pub struct {}{}{{{}}};", name, generics, public_fields.join(", ")))
 }
