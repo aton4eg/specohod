@@ -2,7 +2,6 @@ use ra_ap_hir::{Adt, ModuleDef, Semantics};
 use ra_ap_syntax::ast;
 
 use crate::signature::format_function_signature;
-use crate::types::StructInfo;
 use crate::visibility::is_pub;
 
 pub fn resolve_impl_self_type_name(
@@ -25,14 +24,6 @@ pub fn resolve_impl_self_type_name(
         .then(|| struct_def.name(sema.db).as_str().to_string())
 }
 
-pub fn enrich_struct_with_public_methods(
-    _sema: &Semantics<ra_ap_ide::RootDatabase>,
-    i: &ast::Impl,
-    s: &mut StructInfo,
-) {
-    s.methods.extend(collect_public_methods_from_impl(i));
-}
-
 pub fn collect_public_methods_from_impl(i: &ast::Impl) -> Vec<String> {
     let Some(assoc_list) = i.assoc_item_list() else {
         return Vec::new();
@@ -51,6 +42,4 @@ pub fn collect_public_methods_from_impl(i: &ast::Impl) -> Vec<String> {
     }
 
     methods
-
-    //Some(format!("pub struct {}{}{{{}}};", name, generics, public_fields.join(", ")))
 }

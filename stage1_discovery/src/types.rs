@@ -1,11 +1,11 @@
 use serde::Serialize;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize)]
 pub struct WorkspaceGraph {
     pub crates: Vec<CrateInfo>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize)]
 pub struct CrateInfo {
     pub name: String,
     pub root_dir: String,
@@ -13,7 +13,7 @@ pub struct CrateInfo {
     pub modules: Vec<ModuleInfo>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize)]
 pub struct ModuleInfo {
     pub file_path: String,
     pub module_path: String,

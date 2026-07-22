@@ -75,9 +75,10 @@ for dir in "$X1"/*/; do
 
     # Set RUST_LOG=trace 
     # output (stdout and stderr) goes to trace.log inside project directory
-    RUST_LOG=trace setsid cargo run --release -- \
+    # Pass the API key through the environment (LLM_API_KEY) rather than a
+    # command-line flag, so it is not visible in `ps` output.
+    RUST_LOG=trace LLM_API_KEY="$API_KEY" setsid cargo run --release -- \
         --root "$subdir" \
-        --api-key "$API_KEY" \
         --model "$MODEL" \
         > "$subdir/trace.log" 2>&1 &
     CARGO_PID=$!

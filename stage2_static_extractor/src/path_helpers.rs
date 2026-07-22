@@ -10,13 +10,14 @@ pub fn get_absolute_module_path(
         if let Some(name) = m.name(db) {
             segments.push(name.as_str().to_string());
         } else {
-            segments.push(
-                m.krate(db)
-                    .display_name(db)
-                    .unwrap()
-                    .crate_name()
-                    .to_string(),
-            );
+            // Root module: use the crate name, falling back to a placeholder for
+            // crates without a display name instead of panicking.
+            let crate_name = m
+                .krate(db)
+                .display_name(db)
+                .map(|d| d.crate_name().to_string())
+                .unwrap_or_else(|| "unknown_crate".to_string());
+            segments.push(crate_name);
         }
     }
     if segments.is_empty() {
@@ -26,7 +27,10 @@ pub fn get_absolute_module_path(
     }
 }
 
-pub fn get_canonical_path(sema: &Semantics<ra_ap_ide::RootDatabase>, def: ModuleDef) -> Option<String> {
+pub fn get_canonical_path(
+    sema: &Semantics<ra_ap_ide::RootDatabase>,
+    def: ModuleDef,
+) -> Option<String> {
     let db = sema.db;
     match def {
         ModuleDef::Module(m) => Some(get_absolute_module_path(sema, m)),

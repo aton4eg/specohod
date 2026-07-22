@@ -7,7 +7,7 @@ use ra_ap_vfs::{AbsPath, Vfs};
 
 use crate::path_helpers::get_canonical_path;
 use crate::types::{Dependency, ModuleDeps};
-use crate::visibility::is_inside_test_module;
+use crate::visibility::is_test_module;
 
 pub fn collect_external_paths(
     sema: &Semantics<ra_ap_ide::RootDatabase>,
@@ -18,7 +18,9 @@ pub fn collect_external_paths(
     current_module: &AbsPath,
 ) {
     let current_path: PathBuf = current_module.into();
-    if is_inside_test_module(node) {
+    // Prune test modules top-down: if this node is a test module, its whole
+    // subtree is skipped because we return before recursing into children.
+    if is_test_module(node) {
         return; // completely ignore this AST branch
     }
     if let Some(path) = ast::Path::cast(node.clone())

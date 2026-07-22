@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::{fs, path::Path};
+use std::{fs, path::Path, path::PathBuf};
 
 use anyhow::{Context, Result};
 use syn::{File, Item, ItemMod};
@@ -14,129 +13,112 @@ pub fn analyze_module(
 ) -> Result<ModuleInfo> {
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
-    let _ast: File = syn::parse_file(&content)
-        .with_context(|| format!("Failed to parse file: {}", file_path.display()))?;
-
-    let mut visited = HashMap::new();
-    analyze_module_recursive(file_path, crate_name, module_path, &mut visited)
-}
-
-fn analyze_module_recursive(
-    file_path: &Path,
-    crate_name: &str,
-    module_path: Vec<String>,
-    visited: &mut HashMap<Vec<String>, ModuleInfo>,
-) -> Result<ModuleInfo> {
-    let key = module_path.clone();
-    if let Some(cached) = visited.get(&key) {
-        return Ok(cached.clone());
-    }
-
-    let content = fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
     let ast: File = syn::parse_file(&content)
         .with_context(|| format!("Failed to parse file: {}", file_path.display()))?;
 
-    let mut queue = Vec::new();
+    // Directory where `mod name;` file-modules declared in this file live.
+    let search_dir = module_search_dir(file_path);
+    // Base directory for top-level `#[path = "..."]` attributes: the directory
+    // the source file is located in.
+    let file_dir = file_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
 
-    for item in &ast.items {
-        if let Item::Mod(m) = item {
-            queue.push((m, file_path.to_path_buf()));
-        }
-    }
-
-    let mut processed_module = ModuleInfo {
+    let mut module = ModuleInfo {
         file_path: file_path.to_string_lossy().into_owned(),
         module_path: module_path.join("::"),
         submodules: Vec::new(),
     };
 
-    for (item_mod, parent_file) in queue {
-        process_module_queue(
-            item_mod,
-            &parent_file,
-            crate_name,
-            &module_path,
-            &mut processed_module.submodules,
-            visited,
-        )?;
+    for item in &ast.items {
+        if let Item::Mod(item_mod) = item {
+            process_module(
+                item_mod,
+                &search_dir,
+                &file_dir,
+                crate_name,
+                &module_path,
+                &mut module.submodules,
+            )?;
+        }
     }
 
-    let result = if visited.contains_key(&module_path) {
-        visited.get(&module_path).unwrap().clone()
-    } else {
-        processed_module
-    };
-
-    visited.insert(module_path, result.clone());
-    Ok(result)
+    Ok(module)
 }
 
-fn process_module_queue(
+/// Directory in which `mod name;` declarations inside `file_path` resolve their
+/// target file, following Rust's rules:
+/// - for the crate root (`lib.rs`/`main.rs`) or a `mod.rs`, it is the file's own
+///   directory;
+/// - otherwise (e.g. `foo.rs`) it is a subdirectory named after the file stem.
+fn module_search_dir(file_path: &Path) -> PathBuf {
+    let dir = file_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let stem = file_path.file_stem().and_then(|s| s.to_str());
+    match stem {
+        Some("lib") | Some("main") | Some("mod") => dir,
+        Some(other) => dir.join(other),
+        None => dir,
+    }
+}
+
+/// Process a single `mod` item.
+///
+/// - `search_dir`: directory in which a `mod name;` file-module of the current
+///   scope resolves.
+/// - `path_attr_base`: base directory for a `#[path = "..."]` attribute at this
+///   level.
+fn process_module(
     item_mod: &ItemMod,
-    parent_file: &Path,
+    search_dir: &Path,
+    path_attr_base: &Path,
     crate_name: &str,
     parent_module_path: &[String],
     parent_submodules: &mut Vec<ModuleInfo>,
-    visited: &mut HashMap<Vec<String>, ModuleInfo>,
 ) -> Result<()> {
     let name = item_mod.ident.to_string();
     let mut current_path: Vec<String> = parent_module_path.to_vec();
     current_path.push(name.clone());
 
     if let Some((_, items)) = &item_mod.content {
-        let mut queue = Vec::new();
-
-        for item in items {
-            if let Item::Mod(inner_mod) = item {
-                queue.push((inner_mod, parent_file.to_path_buf()));
-            }
-        }
+        // Inline module: its file-modules and `#[path]` attributes resolve
+        // relative to `search_dir/name`, including the inline module component.
+        let inner_dir = search_dir.join(&name);
 
         let mut inline_module = ModuleInfo {
-            file_path: parent_file.to_string_lossy().into_owned(),
+            file_path: path_attr_base.to_string_lossy().into_owned(),
             module_path: current_path.join("::"),
             submodules: Vec::new(),
         };
 
-        for (child_mod, child_parent_file) in queue {
-            process_module_queue(
-                child_mod,
-                &child_parent_file,
-                crate_name,
-                &current_path,
-                &mut inline_module.submodules,
-                visited,
-            )?;
+        for item in items {
+            if let Item::Mod(inner_mod) = item {
+                process_module(
+                    inner_mod,
+                    &inner_dir,
+                    &inner_dir,
+                    crate_name,
+                    &current_path,
+                    &mut inline_module.submodules,
+                )?;
+            }
         }
 
-        let final_module = if visited.contains_key(&current_path) {
-            visited.get(&current_path).unwrap().clone()
-        } else {
-            inline_module
-        };
-
-        visited.insert(current_path.clone(), final_module.clone());
-        parent_submodules.push(final_module);
+        parent_submodules.push(inline_module);
     } else {
-        let base_dir = parent_file
-            .parent()
-            .context("Module file has no parent directory")?;
-
-        let path_attr_value = extract_path_attribute(&item_mod.attrs);
-
-        let file_path = if let Some(custom) = path_attr_value {
-            base_dir.join(custom)
+        let file_path = if let Some(custom) = extract_path_attribute(&item_mod.attrs) {
+            path_attr_base.join(custom)
         } else {
-            let file1 = base_dir.join(format!("{}.rs", name));
-            let file2 = base_dir.join(&name).join("mod.rs");
-
+            let file1 = search_dir.join(format!("{}.rs", name));
+            let file2 = search_dir.join(&name).join("mod.rs");
             if file1.exists() { file1 } else { file2 }
         };
 
         if file_path.exists() {
-            let external_module =
-                analyze_module_recursive(&file_path, crate_name, current_path, visited)?;
+            let external_module = analyze_module(&file_path, crate_name, current_path)?;
             parent_submodules.push(external_module);
         }
     }

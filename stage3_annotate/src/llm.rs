@@ -5,7 +5,6 @@ use std::sync::{
 use std::time::Duration;
 
 use anyhow::Context;
-use log::info;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -133,30 +132,6 @@ impl LlmClient {
             .fetch_add(completion_len, Ordering::Relaxed);
     }
 
-    fn log_cumulative_stats(&self) {
-        info!("\n=== LLM Cumulative Statistics ===");
-        info!(
-            "Prompt tokens:   {}",
-            self.stats.prompt_tokens.load(Ordering::Relaxed)
-        );
-        info!(
-            "Completion tokens: {}",
-            self.stats.completion_tokens.load(Ordering::Relaxed)
-        );
-        info!(
-            "Total tokens:    {}",
-            self.stats.total_tokens.load(Ordering::Relaxed)
-        );
-        info!(
-            "Prompt chars:    {}",
-            self.stats.prompt_chars.load(Ordering::Relaxed)
-        );
-        info!(
-            "Completion chars: {}",
-            self.stats.completion_chars.load(Ordering::Relaxed)
-        );
-    }
-
     async fn send_request(
         &self,
         url: &str,
@@ -177,7 +152,11 @@ impl LlmClient {
         user_prompt_len: usize,
     ) -> std::result::Result<String, LlmError> {
         let chat_response: ChatResponse = serde_json::from_str(&response_text).map_err(|e| {
-            LlmError::Other(anyhow::anyhow!("Failed to parse LLM response: {}. Body: {}", e, response_text))
+            LlmError::Other(anyhow::anyhow!(
+                "Failed to parse LLM response: {}. Body: {}",
+                e,
+                response_text
+            ))
         })?;
 
         let content = chat_response
@@ -190,7 +169,6 @@ impl LlmClient {
         let prompt_len = (system_prompt_len + user_prompt_len) as u64;
         let completion_len = content.len() as u64;
         self.update_usage_stats(chat_response.usage, prompt_len, completion_len);
-        self.log_cumulative_stats();
 
         Ok(content)
     }
@@ -221,14 +199,21 @@ impl LlmClient {
                             .context("Failed to read response body")
                             .map_err(LlmError::Other)?;
                         return self
-                            .parse_success_response(response_text, system_prompt_len, user_prompt_len)
+                            .parse_success_response(
+                                response_text,
+                                system_prompt_len,
+                                user_prompt_len,
+                            )
                             .await;
                     }
 
                     let error_text = response.text().await.unwrap_or_default();
                     log::warn!(
                         "LLM request failed (attempt {}/{}): status {}, body: {}",
-                        attempt, MAX_RETRIES, status.as_u16(), error_text,
+                        attempt,
+                        MAX_RETRIES,
+                        status.as_u16(),
+                        error_text,
                     );
 
                     if status == StatusCode::BAD_REQUEST
@@ -246,13 +231,17 @@ impl LlmClient {
 
                     return Err(LlmError::Other(anyhow::anyhow!(
                         "LLM API error after {} attempts: {} - {}",
-                        attempt, status, error_text,
+                        attempt,
+                        status,
+                        error_text,
                     )));
                 }
                 Err(e) => {
                     log::warn!(
                         "LLM request network error (attempt {}/{}): {}",
-                        attempt, MAX_RETRIES, e,
+                        attempt,
+                        MAX_RETRIES,
+                        e,
                     );
                     if attempt < MAX_RETRIES {
                         let delay = compute_retry_delay_ms(attempt);

@@ -35,6 +35,4 @@ pub fn extract_struct_definition_with_public_fields(
     }
     public_struct_info.fields = public_fields.join(", ");
     Some(public_struct_info)
-
-    //Some(format!("pub struct {}{}{{{}}};", name, generics, public_fields.join(", ")))
 }

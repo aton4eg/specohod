@@ -14,27 +14,33 @@ pub fn is_pub<N: ast::HasVisibility>(node: &N) -> bool {
     }
 }
 
-pub fn is_inside_test_module(node: &ra_ap_syntax::SyntaxNode) -> bool {
-    let mut current = node.clone();
-    while let Some(parent) = current.parent() {
-        if let Some(module) = ast::Module::cast(parent.clone()) {
-            if let Some(name) = module.name()
-                && (name.text() == "test" || name.text() == "tests")
-            {
+/// Returns `true` if `node` is itself a test module declaration (`mod test`,
+/// `mod tests`, or a `#[cfg(test)]`-gated module).
+///
+/// This only inspects the node itself. Callers that walk the syntax tree
+/// top-down can prune the whole subtree when this returns `true`, which avoids
+/// the previous O(nodes × depth) behaviour of re-walking every ancestor chain.
+pub fn is_test_module(node: &ra_ap_syntax::SyntaxNode) -> bool {
+    let Some(module) = ast::Module::cast(node.clone()) else {
+        return false;
+    };
+
+    if let Some(name) = module.name()
+        && (name.text() == "test" || name.text() == "tests")
+    {
+        return true;
+    }
+
+    for attr in module.attrs() {
+        if let Some(path) = attr.path()
+            && path.syntax().text() == "cfg"
+        {
+            let text = attr.syntax().text().to_string();
+            if text.contains("test") {
                 return true;
             }
-            for attr in module.attrs() {
-                if let Some(path) = attr.path()
-                    && path.syntax().text() == "cfg"
-                {
-                    let text = attr.syntax().text().to_string();
-                    if text.contains("test") || text.contains("tests") {
-                        return true;
-                    }
-                }
-            }
         }
-        current = parent; // now parent is not moved above
     }
+
     false
 }

@@ -43,7 +43,9 @@ struct Args {
     #[arg(long, default_value = "")]
     api_base: String,
 
-    #[arg(long, default_value = "")]
+    /// API key. Prefer supplying this via the `LLM_API_KEY` environment
+    /// variable so it does not leak into the process list / shell history.
+    #[arg(long, env = "LLM_API_KEY", default_value = "")]
     api_key: String,
 
     #[arg(long, default_value = "")]
@@ -111,6 +113,13 @@ fn log_llm_stats(stats: &LlmStats) {
 async fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
+
+    if args.api_base.trim().is_empty() {
+        anyhow::bail!("--api-base must not be empty");
+    }
+    if args.model.trim().is_empty() {
+        anyhow::bail!("--model must not be empty");
+    }
 
     info!("Scanning project at {:?}", args.root);
     let modules = collector::collect_modules(&args.root)?;

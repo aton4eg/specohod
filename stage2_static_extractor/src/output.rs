@@ -20,8 +20,10 @@ pub fn write_facts(vfs: &Vfs, file_id: FileId, facts: &ModuleFacts) {
         None => return,
     };
     let output = parent.join(format!("{}.facts.json", file_stem));
-    let json = serde_json::to_string_pretty(facts).unwrap();
-    let _ = fs::write(output, json);
+    let json = serde_json::to_string_pretty(facts).expect("ModuleFacts must serialize");
+    if let Err(e) = fs::write(&output, json) {
+        eprintln!("Failed to write {output}: {e}");
+    }
 }
 
 pub fn write_deps(vfs: &Vfs, file_id: FileId, deps: &ModuleDeps) {
@@ -39,6 +41,8 @@ pub fn write_deps(vfs: &Vfs, file_id: FileId, deps: &ModuleDeps) {
         None => return,
     };
     let output = parent.join(format!("{}.deps.json", file_stem));
-    let json = serde_json::to_string_pretty(deps).unwrap();
-    let _ = fs::write(output, json);
+    let json = serde_json::to_string_pretty(deps).expect("ModuleDeps must serialize");
+    if let Err(e) = fs::write(&output, json) {
+        eprintln!("Failed to write {output}: {e}");
+    }
 }

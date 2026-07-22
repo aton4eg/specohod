@@ -10,8 +10,10 @@ use rustc_hash::FxHashMap;
 pub fn load_db(manifest_path: &Path) -> (AnalysisHost, Vfs, ProjectWorkspace) {
     let utf8 = Utf8PathBuf::from(manifest_path.to_string_lossy().to_string());
     let abs = AbsPathBuf::assert(utf8);
-    let manifest = ProjectManifest::discover_single(&abs).unwrap();
-    let workspace = ProjectWorkspace::load(manifest, &Default::default(), &move |_| {}).unwrap();
+    let manifest = ProjectManifest::discover_single(&abs)
+        .expect("Failed to discover a Cargo manifest at the given path");
+    let workspace = ProjectWorkspace::load(manifest, &Default::default(), &move |_| {})
+        .expect("Failed to load the Cargo workspace");
 
     let config = LoadCargoConfig {
         load_out_dirs_from_check: true,
@@ -21,7 +23,8 @@ pub fn load_db(manifest_path: &Path) -> (AnalysisHost, Vfs, ProjectWorkspace) {
         proc_macro_processes: 4,
     };
     let extra_env = FxHashMap::default();
-    let (db, vfs, _proc_macro) = load_workspace(workspace.clone(), &extra_env, &config).unwrap();
+    let (db, vfs, _proc_macro) = load_workspace(workspace.clone(), &extra_env, &config)
+        .expect("Failed to load workspace into the rust-analyzer database");
     let host = AnalysisHost::with_database(db);
     (host, vfs, workspace)
 }

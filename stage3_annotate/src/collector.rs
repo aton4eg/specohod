@@ -72,10 +72,18 @@ pub fn read_dependencies(deps_path: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for dep in deps.dependency {
         let path = PathBuf::from(&dep.file_path);
-        if let Ok(canon) = path.canonicalize() {
-            paths.push(canon);
-        } else {
-            log::warn!("Dependency path does not exist: {}", dep.file_path);
+        match path.canonicalize() {
+            Ok(canon) => paths.push(canon),
+            Err(e) => {
+                // Keep the raw path so the edge can still resolve if it matches a
+                // known module; only truly external deps end up filtered later.
+                log::warn!(
+                    "Could not canonicalize dependency path {}: {}",
+                    dep.file_path,
+                    e
+                );
+                paths.push(path);
+            }
         }
     }
     Ok(paths)

@@ -17,6 +17,13 @@ struct DepData {
     facts: String,
 }
 
+/// A generated partial specification kept in memory (path is retained only for
+/// the on-disk artifact and for logging).
+struct PartialSpec {
+    path: PathBuf,
+    content: String,
+}
+
 struct PartialSpecContext<'a> {
     code: &'a str,
     facts: &'a str,
@@ -28,7 +35,7 @@ async fn generate_partial_specs_recursive(
     deps: &[DepData],
     ctx: &PartialSpecContext<'_>,
     start_index: &mut u32,
-) -> Result<Vec<PathBuf>> {
+) -> Result<Vec<PartialSpec>> {
     let mut deps_specs = String::new();
     let mut deps_facts = String::new();
     for d in deps {
@@ -71,10 +78,13 @@ async fn generate_partial_specs_recursive(
             let new_name = format!("{}.partial.{}.spec.md", stem, index);
             partial_path.set_file_name(&new_name);
 
-            std::fs::write(&partial_path, generated)
+            std::fs::write(&partial_path, &generated)
                 .with_context(|| format!("Failed to write partial spec to {:?}", partial_path))?;
             log::info!("Generated partial spec: {:?}", partial_path);
-            Ok(vec![partial_path])
+            Ok(vec![PartialSpec {
+                path: partial_path,
+                content: generated,
+            }])
         }
         Err(LlmError::ContextLengthExceeded) => {
             if deps.len() <= 1 {
@@ -86,13 +96,13 @@ async fn generate_partial_specs_recursive(
             let left = &deps[..mid];
             let right = &deps[mid..];
 
-            let mut left_paths =
+            let mut left_specs =
                 Box::pin(generate_partial_specs_recursive(left, ctx, start_index)).await?;
-            let right_paths =
+            let right_specs =
                 Box::pin(generate_partial_specs_recursive(right, ctx, start_index)).await?;
 
-            left_paths.extend(right_paths);
-            Ok(left_paths)
+            left_specs.extend(right_specs);
+            Ok(left_specs)
         }
         Err(other) => Err(other.into()),
     }
@@ -111,7 +121,7 @@ async fn generate_via_partial_merge(
 
     let mut dep_data_list = Vec::new();
     for dep_path in deps {
-        if let Some(dep_module) = all_modules.iter().find(|m| m.file_path == dep_path) {
+        if let Some(dep_module) = ctx.module_index.get(&dep_path).map(|&i| &all_modules[i]) {
             let facts = std::fs::read_to_string(&dep_module.facts_path).ok();
             let spec = if dep_module.spec_path.exists() {
                 std::fs::read_to_string(&dep_module.spec_path).ok()
@@ -139,14 +149,15 @@ async fn generate_via_partial_merge(
         base_path: output_path,
         generation: ctx,
     };
-    let partial_paths =
+    let partial_specs =
         generate_partial_specs_recursive(&dep_data_list, &partial_ctx, &mut start_index).await?;
 
     let mut partial_specs_content = String::new();
-    for p in &partial_paths {
-        let content = std::fs::read_to_string(p)
-            .with_context(|| format!("Failed to read partial spec {:?}", p))?;
-        partial_specs_content.push_str(&format!("\n--- Partial spec: {:?} ---\n{}\n", p, content));
+    for p in &partial_specs {
+        partial_specs_content.push_str(&format!(
+            "\n--- Partial spec: {:?} ---\n{}\n",
+            p.path, p.content
+        ));
     }
 
     let mut vars = HashMap::new();
@@ -196,7 +207,7 @@ pub(super) async fn generate_spec(
     let mut prelim_flag = false;
 
     for dep_path in deps {
-        if let Some(dep_module) = all_modules.iter().find(|m| m.file_path == dep_path) {
+        if let Some(dep_module) = ctx.module_index.get(&dep_path).map(|&i| &all_modules[i]) {
             if let Ok(f) = std::fs::read_to_string(&dep_module.facts_path) {
                 deps_facts.push_str(&format!(
                     "\n--- Dependency facts: {:?} ---\n{}\n",
@@ -253,27 +264,17 @@ pub(super) async fn generate_spec(
                 "Context length exceeded for module {:?}, switching to partial generation",
                 module.file_path
             );
-            generate_via_partial_merge(module, all_modules, output_path, &code, &facts, ctx, &code_hash)
-                .await
+            generate_via_partial_merge(
+                module,
+                all_modules,
+                output_path,
+                &code,
+                &facts,
+                ctx,
+                &code_hash,
+            )
+            .await
         }
         Err(other) => Err(other.into()),
     }
-}
-
-pub(super) fn count_horizontal_dependencies(
-    module: &Module,
-    all_modules: &[Module],
-) -> Result<usize> {
-    let deps = crate::collector::read_dependencies(&module.deps_path)?;
-    let current_parent = module.file_path.parent();
-
-    let mut count = 0;
-    for dep_path in deps {
-        if let Some(dep_module) = all_modules.iter().find(|m| m.file_path == dep_path)
-            && dep_module.file_path.parent() == current_parent
-        {
-            count += 1;
-        }
-    }
-    Ok(count)
 }

@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use futures::future::try_join_all;
+use petgraph::Direction;
 use petgraph::graph::DiGraph;
 use petgraph::graph::NodeIndex;
-use petgraph::Direction;
-use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::collector::Module;
@@ -28,6 +28,9 @@ pub struct Prompts {
 struct GenerationContext {
     prompts: Arc<Prompts>,
     llm: Arc<LlmClient>,
+    /// Maps a module file path to its index in the shared `modules` slice,
+    /// so dependency lookups are O(1) instead of a linear scan per dependency.
+    module_index: HashMap<PathBuf, usize>,
 }
 
 async fn process_scc(
@@ -40,7 +43,7 @@ async fn process_scc(
         .iter()
         .map(|&idx| {
             let path = graph.node_weight(idx).unwrap();
-            modules.iter().find(|m| &m.file_path == path).unwrap()
+            &modules[ctx.module_index[path]]
         })
         .collect();
 
@@ -55,23 +58,20 @@ async fn process_scc(
 
     log::info!("Processing cyclic SCC with {} modules", scc_modules.len());
 
-    let mut ordered_modules: Vec<(&Module, usize)> = Vec::new();
-    for m in scc_modules {
-        let count = generator::count_horizontal_dependencies(m, modules)?;
-        ordered_modules.push((m, count));
-    }
-    ordered_modules.sort_by_key(|(_, cnt)| *cnt);
-
     // Phase 1: Generate preliminary specs for all modules (parallel)
-    try_join_all(ordered_modules.iter().map(|(module, _)| {
-        generator::generate_spec(module, modules, &module.prelim_spec_path, ctx)
-    }))
+    try_join_all(
+        scc_modules
+            .iter()
+            .map(|module| generator::generate_spec(module, modules, &module.prelim_spec_path, ctx)),
+    )
     .await?;
 
     // Phase 2: Generate final specs for all modules (parallel)
-    try_join_all(ordered_modules.iter().map(|(module, _)| {
-        generator::generate_spec(module, modules, &module.spec_path, ctx)
-    }))
+    try_join_all(
+        scc_modules
+            .iter()
+            .map(|module| generator::generate_spec(module, modules, &module.spec_path, ctx)),
+    )
     .await?;
 
     Ok(())
@@ -107,10 +107,12 @@ fn build_scc_deps(
         for &node in scc {
             for neighbor in graph.neighbors_directed(node, Direction::Outgoing) {
                 if let Some(&j) = scc_of_node.get(&neighbor)
-                    && j != i && seen.insert(j) {
-                        dep_count[i] += 1;
-                        dependants[j].push(i);
-                    }
+                    && j != i
+                    && seen.insert(j)
+                {
+                    dep_count[i] += 1;
+                    dependants[j].push(i);
+                }
             }
         }
     }
@@ -127,11 +129,24 @@ pub async fn process_modules(
     concurrency: usize,
 ) -> Result<()> {
     let concurrency = concurrency.max(1);
-    let semaphore = Arc::new(Semaphore::new(concurrency));
-    let llm = Arc::new(LlmClient::new(llm_config.clone(), stats, semaphore.clone()));
+    // Two independent limiters. `dispatch_semaphore` bounds how many SCC tasks
+    // run at once; `llm_semaphore` (owned by the LlmClient) bounds concurrent
+    // LLM requests. They MUST be distinct: a running SCC task holds a dispatch
+    // permit for its whole lifetime and then acquires an LLM permit inside
+    // `generate()`. Sharing one semaphore made each task need two permits from
+    // the same pool and deadlocked whenever `ready >= concurrency`.
+    let dispatch_semaphore = Arc::new(Semaphore::new(concurrency));
+    let llm_semaphore = Arc::new(Semaphore::new(concurrency));
+    let llm = Arc::new(LlmClient::new(llm_config.clone(), stats, llm_semaphore));
+    let module_index = modules
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.file_path.clone(), i))
+        .collect();
     let ctx = Arc::new(GenerationContext {
         prompts: Arc::new(prompts),
         llm,
+        module_index,
     });
 
     let sccs = crate::graph::compute_topological_sccs(&graph);
@@ -162,7 +177,7 @@ pub async fn process_modules(
                 Err(mpsc::error::TryRecvError::Disconnected) => break,
             };
 
-            let permit = match semaphore.clone().try_acquire_owned() {
+            let permit = match dispatch_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
                     // All permits in use — push back and wait for a completion

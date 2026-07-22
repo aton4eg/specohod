@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
-use log::info;
+use anyhow::Result;
 use petgraph::Direction;
 use petgraph::algo::tarjan_scc;
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -53,48 +52,4 @@ pub fn build_dependency_graph(
     }
 
     Ok((graph, node_map))
-}
-
-#[allow(unused)]
-pub fn topological_sort(
-    graph: &DiGraph<PathBuf, ()>,
-    _node_map: &HashMap<PathBuf, NodeIndex>,
-) -> Result<Vec<NodeIndex>> {
-    petgraph::algo::toposort(graph, None).map_err(|cycle| {
-        anyhow!(
-            "Cycle detected involving module: {:?}",
-            graph.node_weight(cycle.node_id())
-        )
-    })
-}
-
-#[allow(unused)]
-pub fn find_and_print_cycles(graph: &DiGraph<PathBuf, ()>) -> Vec<Vec<PathBuf>> {
-    let sccs = tarjan_scc(graph);
-    let mut cyclic_components = Vec::new();
-
-    for component in sccs {
-        let is_cyclic = if component.len() > 1 {
-            true
-        } else {
-            let node = component[0];
-            graph
-                .neighbors_directed(node, Direction::Outgoing)
-                .any(|n| n == node)
-        };
-
-        if is_cyclic {
-            let nodes_data: Vec<PathBuf> = component
-                .iter()
-                .map(|&idx| graph.node_weight(idx).unwrap().clone())
-                .collect();
-            info!("Cycle detected in SCC with nodes: {:?}", nodes_data);
-            cyclic_components.push(nodes_data);
-        }
-    }
-
-    if cyclic_components.is_empty() {
-        info!("No cycles found in the graph");
-    }
-    cyclic_components
 }
