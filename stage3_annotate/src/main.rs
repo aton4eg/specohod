@@ -99,18 +99,19 @@ async fn main() -> Result<()> {
     let stats = Arc::new(LlmStats::default());
     info!("Starting spec generation");
     processor::process_modules(
-        &graph,
-        &modules,
+        Arc::new(graph),
+        Arc::from(modules),
         processor::Prompts {
-            system: &system_prompt,
-            final_spec: &final_spec_prompt,
-            prelim_spec: &prelim_spec_prompt,
-            partial: &partial_prompt,
-            merge: &merge_prompt,
-            spec_template: &spec_template,
+            system: system_prompt,
+            final_spec: final_spec_prompt,
+            prelim_spec: prelim_spec_prompt,
+            partial: partial_prompt,
+            merge: merge_prompt,
+            spec_template: spec_template,
         },
         &llm_config,
         stats.clone(),
+        args.concurrency,
     )
     .await?;
 

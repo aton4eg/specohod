@@ -1,11 +1,17 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use futures::future::try_join_all;
 use log::info;
 use petgraph::graph::DiGraph;
 use petgraph::graph::NodeIndex;
+use petgraph::Direction;
+use tokio::sync::mpsc;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::collector::Module;
 use crate::hash::{compute_hash, write_spec_with_hash};
@@ -18,25 +24,25 @@ struct DepData {
     facts: String,
 }
 
-pub struct Prompts<'a> {
-    pub system: &'a str,
-    pub final_spec: &'a str,
-    pub prelim_spec: &'a str,
-    pub partial: &'a str,
-    pub merge: &'a str,
-    pub spec_template: &'a str,
+pub struct Prompts {
+    pub system: String,
+    pub final_spec: String,
+    pub prelim_spec: String,
+    pub partial: String,
+    pub merge: String,
+    pub spec_template: String,
 }
 
-struct GenerationContext<'a> {
-    prompts: Prompts<'a>,
-    llm: &'a LlmClient,
+struct GenerationContext {
+    prompts: Arc<Prompts>,
+    llm: Arc<LlmClient>,
 }
 
 struct PartialSpecContext<'a> {
     code: &'a str,
     facts: &'a str,
     base_path: &'a Path,
-    generation: &'a GenerationContext<'a>,
+    generation: &'a GenerationContext,
 }
 
 async fn generate_partial_specs_recursive(
@@ -66,12 +72,12 @@ async fn generate_partial_specs_recursive(
         "specification_template",
         ctx.generation.prompts.spec_template.to_string(),
     );
-    let user_prompt = template::render(ctx.generation.prompts.partial, &vars);
+    let user_prompt = template::render(&ctx.generation.prompts.partial, &vars);
 
     match ctx
         .generation
         .llm
-        .generate(ctx.generation.prompts.system, &user_prompt)
+        .generate(&ctx.generation.prompts.system, &user_prompt)
         .await
     {
         Ok(generated) => {
@@ -119,7 +125,7 @@ async fn generate_via_partial_merge(
     output_path: &Path,
     code: &str,
     facts: &str,
-    ctx: &GenerationContext<'_>,
+    ctx: &GenerationContext,
     code_hash: &str,
 ) -> Result<()> {
     let deps = crate::collector::read_dependencies(&module.deps_path)?;
@@ -172,9 +178,9 @@ async fn generate_via_partial_merge(
         "specification_template",
         ctx.prompts.spec_template.to_string(),
     );
-    let user_prompt = template::render(ctx.prompts.merge, &vars);
+    let user_prompt = template::render(&ctx.prompts.merge, &vars);
 
-    let merged = ctx.llm.generate(ctx.prompts.system, &user_prompt).await?;
+    let merged = ctx.llm.generate(&ctx.prompts.system, &user_prompt).await?;
 
     write_spec_with_hash(output_path, &merged, code_hash)?;
     log::info!("Merged spec written to {:?}", output_path);
@@ -186,7 +192,7 @@ async fn generate_spec(
     module: &Module,
     all_modules: &[Module],
     output_path: &Path,
-    ctx: &GenerationContext<'_>,
+    ctx: &GenerationContext,
 ) -> Result<()> {
     info!(
         "start generation for {}",
@@ -249,12 +255,12 @@ async fn generate_spec(
     );
 
     let user_prompt = if prelim_flag {
-        template::render(ctx.prompts.prelim_spec, &vars)
+        template::render(&ctx.prompts.prelim_spec, &vars)
     } else {
-        template::render(ctx.prompts.final_spec, &vars)
+        template::render(&ctx.prompts.final_spec, &vars)
     };
 
-    match ctx.llm.generate(ctx.prompts.system, &user_prompt).await {
+    match ctx.llm.generate(&ctx.prompts.system, &user_prompt).await {
         Ok(generated) => {
             write_spec_with_hash(output_path, &generated, &code_hash)?;
             info!(
@@ -268,16 +274,8 @@ async fn generate_spec(
                 "Context length exceeded for module {:?}, switching to partial generation",
                 module.file_path
             );
-            generate_via_partial_merge(
-                module,
-                all_modules,
-                output_path,
-                &code,
-                &facts,
-                ctx,
-                &code_hash,
-            )
-            .await
+            generate_via_partial_merge(module, all_modules, output_path, &code, &facts, ctx, &code_hash)
+                .await
         }
         Err(other) => Err(other.into()),
     }
@@ -302,7 +300,7 @@ async fn process_scc(
     scc_nodes: &[NodeIndex],
     modules: &[Module],
     graph: &DiGraph<PathBuf, ()>,
-    ctx: &GenerationContext<'_>,
+    ctx: &GenerationContext,
 ) -> Result<()> {
     let scc_modules: Vec<&Module> = scc_nodes
         .iter()
@@ -330,35 +328,168 @@ async fn process_scc(
     }
     ordered_modules.sort_by_key(|(_, cnt)| *cnt);
 
-    for (module, _) in &ordered_modules {
-        generate_spec(module, modules, &module.prelim_spec_path, ctx).await?;
-        log::info!("Generated preliminary spec for {:?}", module.file_path);
-    }
+    // Phase 1: Generate preliminary specs for all modules (parallel)
+    try_join_all(ordered_modules.iter().map(|(module, _)| {
+        generate_spec(module, modules, &module.prelim_spec_path, ctx)
+    }))
+    .await?;
 
-    for (module, _) in &ordered_modules {
-        generate_spec(module, modules, &module.spec_path, ctx).await?;
-        log::info!("Generated final spec for {:?}", module.file_path);
-    }
+    // Phase 2: Generate final specs for all modules (parallel)
+    try_join_all(ordered_modules.iter().map(|(module, _)| {
+        generate_spec(module, modules, &module.spec_path, ctx)
+    }))
+    .await?;
 
     Ok(())
 }
 
-pub async fn process_modules(
+/// Build SCC dependency data for the parallel scheduler.
+///
+/// Returns `(dep_count, dependants)` where:
+/// - `dep_count[i]` = number of SCCs that SCC `i` depends on
+/// - `dependants[j]` = list of SCCs that depend on SCC `j`
+fn build_scc_deps(
+    sccs: &[Vec<NodeIndex>],
     graph: &DiGraph<PathBuf, ()>,
-    modules: &[Module],
-    prompts: Prompts<'_>,
+) -> (Vec<usize>, Vec<Vec<usize>>) {
+    let total = sccs.len();
+    if total == 0 {
+        return (vec![], vec![]);
+    }
+
+    // Map each node to its SCC index
+    let mut scc_of_node: HashMap<NodeIndex, usize> = HashMap::new();
+    for (idx, scc) in sccs.iter().enumerate() {
+        for &node in scc {
+            scc_of_node.insert(node, idx);
+        }
+    }
+
+    let mut dep_count = vec![0usize; total];
+    let mut dependants: Vec<Vec<usize>> = vec![vec![]; total];
+
+    for (i, scc) in sccs.iter().enumerate() {
+        let mut seen = HashSet::new();
+        for &node in scc {
+            for neighbor in graph.neighbors_directed(node, Direction::Outgoing) {
+                if let Some(&j) = scc_of_node.get(&neighbor) {
+                    if j != i && seen.insert(j) {
+                        dep_count[i] += 1;
+                        dependants[j].push(i);
+                    }
+                }
+            }
+        }
+    }
+
+    (dep_count, dependants)
+}
+
+pub async fn process_modules(
+    graph: Arc<DiGraph<PathBuf, ()>>,
+    modules: Arc<[Module]>,
+    prompts: Prompts,
     llm_config: &Config,
     stats: Arc<LlmStats>,
+    concurrency: usize,
 ) -> Result<()> {
-    let llm_client = Arc::new(LlmClient::new(llm_config.clone(), stats.clone()));
-    let generation_ctx = GenerationContext {
-        prompts,
-        llm: &llm_client,
-    };
-    let sccs = crate::graph::topological_sccs(graph);
+    let concurrency = concurrency.max(1);
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let llm = Arc::new(LlmClient::new(llm_config.clone(), stats, semaphore.clone()));
+    let ctx = Arc::new(GenerationContext {
+        prompts: Arc::new(prompts),
+        llm,
+    });
 
-    for scc in sccs {
-        process_scc(&scc, modules, graph, &generation_ctx).await?;
+    let sccs = crate::graph::topological_sccs(&graph);
+    let total = sccs.len();
+    if total == 0 {
+        return Ok(());
+    }
+
+    let (mut dep_count, dependants) = build_scc_deps(&sccs, &graph);
+
+    // Channel for ready SCC indices (in-degree 0 = all deps satisfied)
+    let (ready_tx, mut ready_rx) = mpsc::unbounded_channel::<usize>();
+    for (i, &count) in dep_count.iter().enumerate() {
+        if count == 0 {
+            let _ = ready_tx.send(i);
+        }
+    }
+
+    let mut join_set: JoinSet<(usize, Result<()>)> = JoinSet::new();
+    let mut completed = 0;
+
+    loop {
+        // Dispatch as many ready SCCs as permits allow
+        loop {
+            let scc_idx = match ready_rx.try_recv() {
+                Ok(idx) => idx,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            };
+
+            let permit = match semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    // All permits in use — push back and wait for a completion
+                    let _ = ready_tx.send(scc_idx);
+                    break;
+                }
+            };
+
+            let ctx = ctx.clone();
+            let modules = modules.clone();
+            let graph = graph.clone();
+            let scc = sccs[scc_idx].clone();
+
+            join_set.spawn(async move {
+                let _permit = permit;
+                let modules: &[Module] = &*modules;
+                let graph: &DiGraph<PathBuf, ()> = &*graph;
+                let ctx: &GenerationContext = &*ctx;
+                let result = process_scc(&scc, modules, graph, ctx).await;
+                (scc_idx, result)
+            });
+        }
+
+        // Wait for one task to complete
+        if join_set.is_empty() {
+            // All tasks finished without reaching `completed == total`
+            // (should not happen if the channel wiring is correct)
+            break;
+        }
+
+        let Some(result) = join_set.join_next().await else {
+            break;
+        };
+
+        match result {
+            Ok((scc_idx, Ok(()))) => {
+                completed += 1;
+
+                // Unblock dependants of this SCC
+                for &dep_idx in &dependants[scc_idx] {
+                    dep_count[dep_idx] -= 1;
+                    if dep_count[dep_idx] == 0 {
+                        let _ = ready_tx.send(dep_idx);
+                    }
+                }
+            }
+            Ok((_, Err(e))) => {
+                // Cancel remaining tasks by dropping the set
+                join_set.shutdown().await;
+                return Err(e);
+            }
+            Err(e) => {
+                join_set.shutdown().await;
+                return Err(anyhow::anyhow!("Task join error: {}", e));
+            }
+        }
+
+        if completed == total {
+            break;
+        }
     }
 
     Ok(())

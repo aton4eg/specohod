@@ -10,6 +10,7 @@ use anyhow::Context;
 use log::info;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
@@ -89,6 +90,7 @@ pub struct LlmClient {
     config: Config,
     client: Client,
     stats: Arc<LlmStats>,
+    semaphore: Arc<Semaphore>,
 }
 
 fn sanitize_prompt(text: &str) -> String {
@@ -99,11 +101,12 @@ fn sanitize_prompt(text: &str) -> String {
 }
 
 impl LlmClient {
-    pub fn new(config: Config, stats: Arc<LlmStats>) -> Self {
+    pub fn new(config: Config, stats: Arc<LlmStats>, semaphore: Arc<Semaphore>) -> Self {
         Self {
             config,
             client: Client::new(),
             stats,
+            semaphore,
         }
     }
 
@@ -114,6 +117,12 @@ impl LlmClient {
     ) -> std::result::Result<String, LlmError> {
         const MAX_RETRIES: u32 = 8;
         const INITIAL_BACKOFF_MS: u64 = 1000;
+
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Semaphore closed: {}", e)))?;
 
         let url = format!(
             "{}/chat/completions",
