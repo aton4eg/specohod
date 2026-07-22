@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use llm::LlmStats;
 use log::info;
-use petgraph::graph::NodeIndex;
 use petgraph::Direction;
+use petgraph::graph::NodeIndex;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
 
@@ -330,10 +330,10 @@ mod processor {
 
         let mut count = 0;
         for dep_path in deps {
-            if let Some(dep_module) = all_modules.iter().find(|m| m.file_path == dep_path) {
-                if dep_module.file_path.parent() == current_parent {
-                    count += 1;
-                }
+            if let Some(dep_module) = all_modules.iter().find(|m| m.file_path == dep_path)
+                && dep_module.file_path.parent() == current_parent
+            {
+                count += 1;
             }
         }
         Ok(count)
@@ -412,8 +412,8 @@ mod processor {
 mod llm {
     use std::{
         sync::{
-            atomic::{AtomicU64, Ordering},
             Arc,
+            atomic::{AtomicU64, Ordering},
         },
         time::Duration,
     };
@@ -741,11 +741,11 @@ mod graph {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use anyhow::{anyhow, Result};
+    use anyhow::{Result, anyhow};
     use log::info;
+    use petgraph::Direction;
     use petgraph::algo::tarjan_scc;
     use petgraph::graph::{DiGraph, NodeIndex};
-    use petgraph::Direction;
 
     use crate::collector::{self, Module};
 
