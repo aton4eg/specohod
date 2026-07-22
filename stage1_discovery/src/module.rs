@@ -41,7 +41,7 @@ where
     let mut queue = Vec::new();
 
     for item in &ast.items {
-        if let Item::Mod(ref m) = item {
+        if let Item::Mod(m) = item {
             queue.push((m, file_path.to_path_buf()));
         }
     }
@@ -89,7 +89,7 @@ fn process_module_queue(
         let mut queue = Vec::new();
 
         for item in items {
-            if let Item::Mod(ref inner_mod) = item {
+            if let Item::Mod(inner_mod) = item {
                 queue.push((inner_mod, parent_file.to_path_buf()));
             }
         }
@@ -132,11 +132,7 @@ fn process_module_queue(
             let file1 = base_dir.join(format!("{}.rs", name));
             let file2 = base_dir.join(&name).join("mod.rs");
 
-            if file1.exists() {
-                file1
-            } else {
-                file2
-            }
+            if file1.exists() { file1 } else { file2 }
         };
 
         if file_path.exists() {

@@ -448,12 +448,9 @@ fn is_inside_test_module(node: &ra_ap_syntax::SyntaxNode) -> bool {
             for attr in module.attrs() {
                 if let Some(path) = attr.path() {
                     if path.syntax().text() == "cfg" {
-                        if let Some(tt) = attr.token_tree() {
-                            if tt.syntax().text().to_string().contains("test")
-                                || tt.syntax().text().to_string().contains("tests")
-                            {
-                                return true;
-                            }
+                        let text = attr.syntax().text().to_string();
+                        if text.contains("test") || text.contains("tests") {
+                            return true;
                         }
                     }
                 }

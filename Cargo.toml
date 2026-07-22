@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 
 members = ["stage1_discovery", "stage2_static_extractor", "stage3_annotate"]
 
@@ -10,12 +10,12 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.0.0"
-edition = "2021"
-authors = ["KNS Group LLC ('YADRO')"]
+version = "0.1.0"
+edition = "2024"
+authors = [""]
 description = "Spec generation for Rust projects"
 publish = false
-rust-version = "1.75.0"
+rust-version = "1.97.1"
 
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
