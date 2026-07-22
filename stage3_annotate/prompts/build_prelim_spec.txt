@@ -1,0 +1,29 @@
+Build an md specification according to the template.
+In the context you are given:
+
+the source code of the module for which the specification is being built; this file exists
+
+a *.facts.json file listing the public interfaces of this module; this file exists
+
+ready specifications of modules on which the analyzed module depends, but they may not all be present. You may need to make a number of assumptions about dependencies; state them explicitly
+
+*.facts.json files of modules on which the analyzed module depends, listing the public interfaces of those modules; these all exist
+
+a specification template; this file exists
+
+The essence of your work is that you are participating in covering a large software project consisting of many modules with a layer of specifications. In this specific case, you have been given a module that is in a circular dependency, and similar specifications for its dependencies may not yet be ready, so some things will have to be assumed based on *.facts.json (these files all exist).
+
+==CODE OF THE ANALYZED MODULE==
+{{module_code}}
+
+==JSON WITH PUBLIC INTERFACES OF THE ANALYZED MODULE==
+{{module_pub_interfaces}}
+
+==SPECIFICATIONS OF MODULES ON WHICH THE ANALYZED MODULE DEPENDS==
+{{specifications_of_module_dependencies}}
+
+==JSON WITH PUBLIC INTERFACES OF MODULES ON WHICH THE ANALYZED MODULE DEPENDS==
+{{public_interfaces_of_dependencies}}
+
+==SPECIFICATION TEMPLATE==
+{{specification_template}}

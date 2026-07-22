@@ -1,0 +1,106 @@
+# Module Specification
+
+Module: crate_name::path::to::module  
+Rust File: src/path/to/module.rs
+
+---
+
+## 1. Dependencies
+
+From *.deps.json, for each dependency, write down its purpose — why it is used in this module.
+
+---
+
+## 2. Mechanics
+
+Here you need to list the key mechanisms implemented in this module.  
+A key mechanism can be identified by its semantic complexity and/or its public visibility.
+
+Intent:
+- ...
+
+Inputs:
+- ...
+
+Outputs:
+- ...
+
+Steps:
+1.
+2.
+3.
+
+Edge Cases:
+- ...
+
+Complexity:
+- Time:
+- Space:
+
+Determinism:
+- Deterministic | Non-deterministic
+
+---
+
+## 3. Dependency Mechanics
+
+List here the key mechanisms that are important for this module from the Mechanics section of the dependency specifications.
+
+- List of mechanics from the first dependency important for understanding this module
+- List of mechanics from the second dependency important for understanding this module
+...
+
+---
+
+## 4. Data Model
+
+Entities:
+- EntityA
+- EntityB
+
+Relations:
+- A → B (1:N)
+- ...
+
+Global Invariants:
+- ...
+- ...
+
+## 5. Error Model
+
+Error Types:
+- ErrorA
+- ErrorB
+
+Error Propagation Strategy:
+- thiserror | anyhow | custom enum | whatever?
+
+Recoverability:
+- ...
+
+Panics:
+- Allowed: yes/no
+- Conditions:
+
+---
+
+## 6. Traits
+
+List which external traits this module implements:
+- Trait 1
+- Trait 2
+...
+
+## 7. Overview
+
+This section is needed for the evolution of project understanding.  
+Because each module is invoked with its own context, you MUST provide enough information about the purpose of the system that incorporates the current module and its dependency on the current module.  
+You speak here not only about WHAT the module does. Taking the role of the module’s user, you must say WHY the whole system, consisting of this module and its dependencies, is needed.  
+Here you MUST formulate a new Overview based on the Overview from the dependency specifications and the analysis of the current module.  
+You MUST give an exhaustive description for a new analyzing agent, because the new agent will not be able to look at dependencies deeper than one level.  
+You MUST NOT give a simple description of what the system consisting of the module and its dependencies does. You must answer the question — why, because the new agent will not be able to look at dependencies deeper than one level.
+
+This module is used in order to... (organize memory allocation / store blocks / ...)  
+This system contains... (a set of basic primitives / abstractions for organizing ...)  
+A typical usage scenario of the system...  
+Inside the system the following things happen and they use...
