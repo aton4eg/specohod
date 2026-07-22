@@ -950,14 +950,10 @@ fn extract_hash_from_spec(spec_path: &std::path::Path) -> Option<String> {
     let content = std::fs::read_to_string(spec_path).ok()?;
     let first_line = content.lines().next()?;
     let trimmed = first_line.trim();
-    if let Some(inner) = trimmed
+    trimmed
         .strip_prefix("<!-- SPEC_HASH: ")
         .and_then(|s| s.strip_suffix(" -->"))
-    {
-        Some(inner.to_string())
-    } else {
-        None
-    }
+        .map(|inner| inner.to_string())
 }
 
 /// Writes specification, adding source file hash as first line.
