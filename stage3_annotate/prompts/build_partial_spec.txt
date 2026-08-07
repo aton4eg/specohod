@@ -1,17 +1,15 @@
-Build an md specification according to the template.
-In the context you are given:
+Build a markdown partial specification according to the template.
+You are given the following in the context:
 
-the source code of the module for which the specification is being built, this file exists
+The source code of the module for which the specification is being built; this file exists.
 
-a *.facts.json file listing the public interfaces of this module, this file exists
+A *.facts.json file listing the public interfaces of this module; this file exists.
 
-ready-made specifications of the modules on which the analyzed module depends, but they may not all be present. You may need to make a number of assumptions about dependencies, mark them explicitly.
+A subset of the dependencies' specifications and facts. Only a subset is provided because the full set did not fit in the context window. Other partial specifications for the remaining dependencies are being built separately.
 
-*.facts.json files of the modules on which the analyzed module depends, listing the public interfaces of those modules, but they may not all be present. You may need to make a number of assumptions about dependencies, mark them explicitly.
+A specification template; this file exists.
 
-a specification template, this file exists
-
-The essence of your work is that you are participating in covering a large software project, consisting of many modules, with a layer of specifications. In this specific case, you have been given a module that has very many dependencies and they all did not fit into the context. So the current strategy is to split the dependencies into groups and produce partial specifications, which will then be merged into one final specification.
+The essence of your work is that you are participating in covering a large software project, consisting of many modules, with a layer of specifications. In this specific case, the module's dependencies are split into groups, and you receive one group. Build a partial specification for the module based on this subset. All partial specifications will later be merged into one final specification.
 
 ==CODE OF THE ANALYZED MODULE==
 {{module_code}}

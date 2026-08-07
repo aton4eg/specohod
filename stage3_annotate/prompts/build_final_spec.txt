@@ -1,17 +1,17 @@
-Build an md specification according to the template.
+Build a markdown specification according to the template.
 You are given the following in the context:
 
 The source code of the module for which the specification is being built; this file exists.
 
 A *.facts.json file listing the public interfaces of this module; this file exists.
 
-Ready-made specifications of the modules on which the analyzed module depends, but they may not all be present. You may need to make a number of assumptions about dependencies; mark them explicitly.
+Ready-made specifications of the modules on which the analyzed module depends; these are all present.
 
-*.facts.json files of the modules on which the analyzed module depends, listing the public interfaces of those modules, but they may not all be present. You may need to make a number of assumptions about dependencies; mark them explicitly.
+*.facts.json files of the modules on which the analyzed module depends, listing the public interfaces of those modules; these are all present.
 
 A specification template; this file exists.
 
-The essence of your work is that you are participating in covering a large software project, consisting of many modules, with a layer of specifications. In this specific case, you have been given a module with a very large number of dependencies, and they all did not fit into the context. Therefore, a strategy is currently being used: splitting dependencies into groups and creating partial specifications, which will later be merged into one final specification.
+The essence of your work is that you are participating in covering a large software project, consisting of many modules, with a layer of specifications. In this specific case, all dependencies have ready-made specifications. Using all the provided context, generate a single final specification for the entire module.
 
 ==CODE OF THE ANALYZED MODULE==
 {{module_code}}
