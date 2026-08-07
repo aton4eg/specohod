@@ -41,7 +41,7 @@ fn delete_partial_specs(module: &collector::Module) -> Result<()> {
 
         if fname.ends_with(".spec.md") {
             for stem in &[&*stem_spec, &*stem_prelim] {
-                if fname.starts_with::<&str>(stem.as_ref()) {
+                if fname.starts_with(*stem) {
                     let rest = &fname[stem.len()..];
                     if rest.starts_with(".partial.") {
                         std::fs::remove_file(&path)
@@ -61,7 +61,7 @@ pub fn incremental_update(
     graph: &petgraph::graph::DiGraph<PathBuf, ()>,
     node_map: &HashMap<PathBuf, NodeIndex>,
 ) -> Result<()> {
-    let mut changed = HashSet::new();
+    let mut changed = HashSet::with_capacity(modules.len());
 
     for module in modules {
         let code = std::fs::read_to_string(&module.file_path)

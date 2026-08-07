@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use petgraph::Direction;
 use petgraph::algo::tarjan_scc;
 use petgraph::graph::{DiGraph, NodeIndex};
 
@@ -18,10 +17,8 @@ pub fn is_cyclic_scc(graph: &DiGraph<PathBuf, ()>, nodes: &[NodeIndex]) -> bool 
     }
     if nodes.len() == 1 {
         let node = nodes[0];
-        for neighbor in graph.neighbors_directed(node, Direction::Outgoing) {
-            if neighbor == node {
-                return true;
-            }
+        if graph.find_edge(node, node).is_some() {
+            return true;
         }
     }
     false
@@ -30,8 +27,8 @@ pub fn is_cyclic_scc(graph: &DiGraph<PathBuf, ()>, nodes: &[NodeIndex]) -> bool 
 pub fn build_dependency_graph(
     modules: &[Module],
 ) -> Result<(DiGraph<PathBuf, ()>, HashMap<PathBuf, NodeIndex>)> {
-    let mut graph = DiGraph::<PathBuf, ()>::new();
-    let mut node_map = HashMap::new();
+    let mut graph = DiGraph::<PathBuf, ()>::with_capacity(modules.len(), 0);
+    let mut node_map = HashMap::with_capacity(modules.len());
 
     for module in modules {
         let idx = graph.add_node(module.file_path.clone());

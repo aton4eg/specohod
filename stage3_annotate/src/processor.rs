@@ -92,7 +92,7 @@ fn build_scc_deps(
     }
 
     // Map each node to its SCC index
-    let mut scc_of_node: HashMap<NodeIndex, usize> = HashMap::new();
+    let mut scc_of_node: HashMap<NodeIndex, usize> = HashMap::with_capacity(graph.node_count());
     for (idx, scc) in sccs.iter().enumerate() {
         for &node in scc {
             scc_of_node.insert(node, idx);
@@ -165,8 +165,17 @@ pub async fn process_modules(
         }
     }
 
+    // If no SCCs are initially ready, the DAG has a cycle — defensively warn
+    // (this should never happen if tarjan_scc produced correct SCCs)
+    log::info!(
+        "Dispatching {} SCC(s) with concurrency {}",
+        total,
+        concurrency
+    );
+
     let mut join_set: JoinSet<(usize, Result<()>)> = JoinSet::new();
     let mut completed = 0;
+    let mut errors: Vec<(usize, anyhow::Error)> = Vec::new();
 
     loop {
         // Dispatch as many ready SCCs as permits allow
@@ -201,43 +210,60 @@ pub async fn process_modules(
             });
         }
 
-        // Wait for one task to complete
-        if join_set.is_empty() {
-            // All tasks finished without reaching `completed == total`
-            // (should not happen if the channel wiring is correct)
-            break;
-        }
-
         let Some(result) = join_set.join_next().await else {
+            if completed == total {
+                break;
+            }
+            log::warn!(
+                "Scheduler stalled: {}/{} SCC(s) completed, but no tasks remain. \
+                 Possible deadlock in SCC DAG.",
+                completed,
+                total
+            );
             break;
         };
 
-        match result {
-            Ok((scc_idx, Ok(()))) => {
-                completed += 1;
-
-                // Unblock dependants of this SCC
-                for &dep_idx in &dependants[scc_idx] {
-                    dep_count[dep_idx] -= 1;
-                    if dep_count[dep_idx] == 0 {
-                        let _ = ready_tx.send(dep_idx);
-                    }
-                }
-            }
-            Ok((_, Err(e))) => {
-                // Cancel remaining tasks by dropping the set
-                join_set.shutdown().await;
-                return Err(e);
-            }
+        let (scc_idx, task_result) = match result {
+            Ok(pair) => pair,
             Err(e) => {
+                log::error!("Task join error: {}", e);
                 join_set.shutdown().await;
                 return Err(anyhow::anyhow!("Task join error: {}", e));
+            }
+        };
+
+        match task_result {
+            Ok(()) => {
+                completed += 1;
+            }
+            Err(e) => {
+                log::error!("SCC {} failed: {:#}", scc_idx, e);
+                errors.push((scc_idx, e));
+                completed += 1;
+            }
+        }
+
+        // Unblock dependants regardless of whether this SCC succeeded or failed
+        for &dep_idx in &dependants[scc_idx] {
+            dep_count[dep_idx] -= 1;
+            if dep_count[dep_idx] == 0 {
+                let _ = ready_tx.send(dep_idx);
             }
         }
 
         if completed == total {
             break;
         }
+    }
+
+    if !errors.is_empty() {
+        let first = &errors[0];
+        anyhow::bail!(
+            "{} SCC(s) failed (see logs above). First: SCC {}: {:#}",
+            errors.len(),
+            first.0,
+            first.1,
+        );
     }
 
     Ok(())

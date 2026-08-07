@@ -56,6 +56,8 @@ pub fn collect_modules(root: &Path) -> Result<Vec<Module>> {
                     spec_path,
                     prelim_spec_path,
                 });
+            } else {
+                log::debug!("Skipping {:?}: missing .deps.json or .facts.json", rs_path);
             }
         }
     }
@@ -69,18 +71,23 @@ pub fn read_dependencies(deps_path: &Path) -> Result<Vec<PathBuf>> {
     let deps: DepsFile = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse {:?}", deps_path))?;
 
-    let mut paths = Vec::new();
+    let mut paths = Vec::with_capacity(deps.dependency.len());
     for dep in deps.dependency {
         let path = PathBuf::from(&dep.file_path);
         match path.canonicalize() {
             Ok(canon) => paths.push(canon),
-            Err(e) => {
-                // Keep the raw path so the edge can still resolve if it matches a
-                // known module; only truly external deps end up filtered later.
+            Err(_) => {
+                // Try resolving relative to the deps.json file's directory
+                if let Some(parent) = deps_path.parent()
+                    && let Ok(canon) = parent.join(&path).canonicalize()
+                {
+                    paths.push(canon);
+                    continue;
+                }
                 log::warn!(
-                    "Could not canonicalize dependency path {}: {}",
+                    "Could not canonicalize dependency path {} (checked absolute and relative to {:?})",
                     dep.file_path,
-                    e
+                    deps_path.parent(),
                 );
                 paths.push(path);
             }

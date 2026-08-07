@@ -11,10 +11,10 @@ use crate::template;
 
 use super::GenerationContext;
 
-struct DepData {
-    path: PathBuf,
-    spec: String,
-    facts: String,
+pub(super) struct DepData {
+    pub(super) path: PathBuf,
+    pub(super) spec: String,
+    pub(super) facts: String,
 }
 
 /// A generated partial specification kept in memory (path is retained only for
@@ -29,6 +29,41 @@ struct PartialSpecContext<'a> {
     facts: &'a str,
     base_path: &'a Path,
     generation: &'a GenerationContext,
+}
+
+pub(super) fn load_dep_data(
+    module: &Module,
+    all_modules: &[Module],
+    ctx: &GenerationContext,
+) -> (Vec<DepData>, bool) {
+    let Ok(deps) = crate::collector::read_dependencies(&module.deps_path) else {
+        return (Vec::new(), false);
+    };
+    let mut dep_data = Vec::with_capacity(deps.len());
+    let mut prelim_flag = false;
+    for dep_path in deps {
+        let Some(dep_module) = ctx.module_index.get(&dep_path).map(|&i| &all_modules[i]) else {
+            continue;
+        };
+        let Ok(facts) = std::fs::read_to_string(&dep_module.facts_path) else {
+            continue;
+        };
+        let spec = if dep_module.spec_path.exists() {
+            std::fs::read_to_string(&dep_module.spec_path).ok()
+        } else if dep_module.prelim_spec_path.exists() {
+            std::fs::read_to_string(&dep_module.prelim_spec_path).ok()
+        } else {
+            prelim_flag = true;
+            log::warn!("No spec found for dependency {:?}", dep_path);
+            continue;
+        };
+        dep_data.push(DepData {
+            path: dep_path,
+            spec: spec.unwrap(),
+            facts,
+        });
+    }
+    (dep_data, prelim_flag)
 }
 
 async fn generate_partial_specs_recursive(
@@ -49,7 +84,7 @@ async fn generate_partial_specs_recursive(
         ));
     }
 
-    let mut vars = HashMap::new();
+    let mut vars = HashMap::with_capacity(5);
     vars.insert("module_code", ctx.code.to_string());
     vars.insert("module_pub_interfaces", ctx.facts.to_string());
     vars.insert("specifications_of_module_dependencies", deps_specs);
@@ -89,7 +124,9 @@ async fn generate_partial_specs_recursive(
         Err(LlmError::ContextLengthExceeded) => {
             if deps.len() <= 1 {
                 return Err(anyhow::anyhow!(
-                    "Context length exceeded even for a single dependency + module code"
+                    "Context length exceeded even for a single dependency. \
+                     The dependency facts may be too large for the model's context window. \
+                     Consider increasing --context-length or using a model with larger context."
                 ));
             }
             let mid = deps.len() / 2;
@@ -109,39 +146,13 @@ async fn generate_partial_specs_recursive(
 }
 
 async fn generate_via_partial_merge(
-    module: &Module,
-    all_modules: &[Module],
     output_path: &Path,
     code: &str,
     facts: &str,
-    ctx: &GenerationContext,
     code_hash: &str,
+    dep_data_list: &[DepData],
+    ctx: &GenerationContext,
 ) -> Result<()> {
-    let deps = crate::collector::read_dependencies(&module.deps_path)?;
-
-    let mut dep_data_list = Vec::new();
-    for dep_path in deps {
-        if let Some(dep_module) = ctx.module_index.get(&dep_path).map(|&i| &all_modules[i]) {
-            let facts = std::fs::read_to_string(&dep_module.facts_path).ok();
-            let spec = if dep_module.spec_path.exists() {
-                std::fs::read_to_string(&dep_module.spec_path).ok()
-            } else if dep_module.prelim_spec_path.exists() {
-                std::fs::read_to_string(&dep_module.prelim_spec_path).ok()
-            } else {
-                log::warn!("No spec found for dependency {:?}", dep_path);
-                None
-            };
-
-            if let (Some(spec), Some(facts)) = (spec, facts) {
-                dep_data_list.push(DepData {
-                    path: dep_path,
-                    spec,
-                    facts,
-                });
-            }
-        }
-    }
-
     let mut start_index = 1u32;
     let partial_ctx = PartialSpecContext {
         code,
@@ -150,7 +161,7 @@ async fn generate_via_partial_merge(
         generation: ctx,
     };
     let partial_specs =
-        generate_partial_specs_recursive(&dep_data_list, &partial_ctx, &mut start_index).await?;
+        generate_partial_specs_recursive(dep_data_list, &partial_ctx, &mut start_index).await?;
 
     let mut partial_specs_content = String::new();
     for p in &partial_specs {
@@ -160,7 +171,7 @@ async fn generate_via_partial_merge(
         ));
     }
 
-    let mut vars = HashMap::new();
+    let mut vars = HashMap::with_capacity(4);
     vars.insert("module_code", code.to_string());
     vars.insert("partial_specifications", partial_specs_content);
     vars.insert("module_pub_interfaces", facts.to_string());
@@ -200,41 +211,22 @@ pub(super) async fn generate_spec(
 
     let code_hash = compute_hash(&code);
 
-    let deps = crate::collector::read_dependencies(&module.deps_path)?;
+    let (dep_data, prelim_flag) = load_dep_data(module, all_modules, ctx);
 
     let mut deps_specs = String::new();
     let mut deps_facts = String::new();
-    let mut prelim_flag = false;
-
-    for dep_path in deps {
-        if let Some(dep_module) = ctx.module_index.get(&dep_path).map(|&i| &all_modules[i]) {
-            if let Ok(f) = std::fs::read_to_string(&dep_module.facts_path) {
-                deps_facts.push_str(&format!(
-                    "\n--- Dependency facts: {:?} ---\n{}\n",
-                    dep_path, f
-                ));
-            }
-
-            let spec_content = if dep_module.spec_path.exists() {
-                std::fs::read_to_string(&dep_module.spec_path).ok()
-            } else if dep_module.prelim_spec_path.exists() {
-                std::fs::read_to_string(&dep_module.prelim_spec_path).ok()
-            } else {
-                prelim_flag = true;
-                log::warn!("No spec found for dependency {:?}", dep_path);
-                None
-            };
-
-            if let Some(spec) = spec_content {
-                deps_specs.push_str(&format!(
-                    "\n--- Dependency spec: {:?} ---\n{}\n",
-                    dep_path, spec
-                ));
-            }
-        }
+    for d in &dep_data {
+        deps_specs.push_str(&format!(
+            "\n--- Dependency spec: {:?} ---\n{}\n",
+            d.path, d.spec
+        ));
+        deps_facts.push_str(&format!(
+            "\n--- Dependency facts: {:?} ---\n{}\n",
+            d.path, d.facts
+        ));
     }
 
-    let mut vars = HashMap::new();
+    let mut vars = HashMap::with_capacity(5);
     vars.insert("module_code", code.clone());
     vars.insert("module_pub_interfaces", facts.clone());
     vars.insert("specifications_of_module_dependencies", deps_specs);
@@ -264,16 +256,7 @@ pub(super) async fn generate_spec(
                 "Context length exceeded for module {:?}, switching to partial generation",
                 module.file_path
             );
-            generate_via_partial_merge(
-                module,
-                all_modules,
-                output_path,
-                &code,
-                &facts,
-                ctx,
-                &code_hash,
-            )
-            .await
+            generate_via_partial_merge(output_path, &code, &facts, &code_hash, &dep_data, ctx).await
         }
         Err(other) => Err(other.into()),
     }
