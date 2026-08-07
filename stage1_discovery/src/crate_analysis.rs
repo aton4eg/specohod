@@ -58,6 +58,16 @@ fn collect_entry_points(root: &Path, cargo: &toml::Value) -> Vec<PathBuf> {
     entry_points
 }
 
+/// Analyzes a single crate: reads its `Cargo.toml`, discovers entry points,
+/// and recursively analyzes all modules.
+///
+/// # Parameters
+///
+/// * `root` — Path to the crate root directory.
+///
+/// # Returns
+///
+/// A `CrateInfo` with the crate name, entry points, and module tree.
 pub fn analyze_crate(root: &Path) -> Result<CrateInfo> {
     let cargo = read_toml(&root.join("Cargo.toml")).context("Failed to read crate Cargo.toml")?;
 

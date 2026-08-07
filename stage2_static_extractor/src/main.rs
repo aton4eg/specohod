@@ -30,41 +30,15 @@ use struct_parser::extract_struct_definition_with_public_fields;
 use types::{ModuleDeps, ModuleFacts, StructInfo};
 use visibility::is_pub;
 
-fn process_file(
+fn collect_public_api(
     sema: &Semantics<RootDatabase>,
-    db: &RootDatabase,
-    vfs: &Vfs,
-    workspace_root: &std::path::Path,
-    file_id: FileId,
-) {
-    let file_path = match vfs.file_path(file_id).as_path() {
-        Some(p) => p,
-        None => return,
-    };
-
-    // `vfs.iter()` yields every file loaded by rust-analyzer, including all
-    // dependency crates from the cargo registry and the sysroot. Restrict work
-    // (and, crucially, the `.facts.json`/`.deps.json` writes below) to files
-    // that actually live inside the analyzed workspace.
-    let file_pathbuf: std::path::PathBuf = file_path.into();
-    if !file_pathbuf.starts_with(workspace_root) {
-        return;
-    }
-
-    if file_path.components().any(|c| c.as_os_str() == "tests") {
-        return;
-    }
-
-    let tree = sema.parse(EditionedFileId::current_edition(db, file_id));
-    let module = match sema.file_to_module_def(file_id) {
-        Some(m) => m,
-        _ => return,
-    };
-
-    let module_path = get_absolute_module_path(sema, module);
-
+    module: ra_ap_hir::Module,
+    module_path: &str,
+    file_path: &std::path::Path,
+    tree: &impl HasModuleItem,
+) -> ModuleFacts {
     let mut facts = ModuleFacts {
-        module_path: module_path.clone(),
+        module_path: module_path.to_string(),
         file_path: file_path.into(),
         public_structs: Vec::new(),
         public_enums: Vec::new(),
@@ -74,29 +48,6 @@ fn process_file(
 
     let mut list_of_structures: HashMap<String, StructInfo> = HashMap::new();
     let mut pending_methods: HashMap<String, Vec<String>> = HashMap::new();
-
-    let mut deps = ModuleDeps {
-        module_path,
-        file_path: file_path.into(),
-        dependency: HashSet::new(),
-    };
-
-    let utf8_path = match ra_ap_paths::Utf8PathBuf::from_path_buf(file_pathbuf) {
-        Ok(p) => p,
-        Err(non_utf8) => {
-            eprintln!("Skipping non-UTF-8 path: {}", non_utf8.display());
-            return;
-        }
-    };
-    let abs_path = AbsPath::assert(utf8_path.as_path());
-    collect_external_paths(
-        sema,
-        vfs,
-        workspace_root,
-        &mut deps,
-        tree.syntax(),
-        abs_path,
-    );
 
     for item in tree.items() {
         match item {
@@ -146,6 +97,67 @@ fn process_file(
     for (_, struct_rec) in list_of_structures {
         facts.public_structs.push(struct_rec);
     }
+
+    facts
+}
+
+fn process_file(
+    sema: &Semantics<RootDatabase>,
+    db: &RootDatabase,
+    vfs: &Vfs,
+    workspace_root: &std::path::Path,
+    file_id: FileId,
+) {
+    let file_path = match vfs.file_path(file_id).as_path() {
+        Some(p) => p,
+        None => return,
+    };
+
+    // `vfs.iter()` yields every file loaded by rust-analyzer, including all
+    // dependency crates from the cargo registry and the sysroot. Restrict work
+    // (and, crucially, the `.facts.json`/`.deps.json` writes below) to files
+    // that actually live inside the analyzed workspace.
+    let file_pathbuf: std::path::PathBuf = file_path.into();
+    if !file_pathbuf.starts_with(workspace_root) {
+        return;
+    }
+
+    if file_path.components().any(|c| c.as_os_str() == "tests") {
+        return;
+    }
+
+    let tree = sema.parse(EditionedFileId::current_edition(db, file_id));
+    let module = match sema.file_to_module_def(file_id) {
+        Some(m) => m,
+        _ => return,
+    };
+
+    let module_path = get_absolute_module_path(sema, module);
+
+    let mut deps = ModuleDeps {
+        module_path: module_path.clone(),
+        file_path: file_path.into(),
+        dependency: HashSet::new(),
+    };
+
+    let utf8_path = match ra_ap_paths::Utf8PathBuf::from_path_buf(file_pathbuf) {
+        Ok(p) => p,
+        Err(non_utf8) => {
+            eprintln!("Skipping non-UTF-8 path: {}", non_utf8.display());
+            return;
+        }
+    };
+    let abs_path = AbsPath::assert(utf8_path.as_path());
+    collect_external_paths(
+        sema,
+        vfs,
+        workspace_root,
+        &mut deps,
+        tree.syntax(),
+        abs_path,
+    );
+
+    let facts = collect_public_api(sema, module, &module_path, file_path.as_ref(), &tree);
 
     write_facts(vfs, file_id, &facts);
     write_deps(vfs, file_id, &deps);

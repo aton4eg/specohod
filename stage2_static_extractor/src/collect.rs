@@ -9,6 +9,20 @@ use crate::path_helpers::get_canonical_path;
 use crate::types::{Dependency, ModuleDeps};
 use crate::visibility::is_test_module;
 
+/// Walks the syntax tree of a module and collects dependencies on external
+/// (cross-module) paths and modules within the same workspace.
+///
+/// Recursively descends into child nodes. Test modules (`#[cfg(test)]`,
+/// `mod test`, `mod tests`) are pruned top-down.
+///
+/// # Parameters
+///
+/// * `sema` — rust-analyzer `Semantics` for name resolution.
+/// * `vfs` — Virtual file system.
+/// * `workspace_root` — Root of the analyzed workspace.
+/// * `deps` — Mutable `ModuleDeps` accumulator.
+/// * `node` — Current syntax node to scan.
+/// * `current_module` — Absolute path of the current file.
 pub fn collect_external_paths(
     sema: &Semantics<ra_ap_ide::RootDatabase>,
     vfs: &Vfs,
@@ -63,6 +77,12 @@ pub fn collect_external_paths(
     }
 }
 
+/// Resolves a `ra_ap_hir::Module` to its file path via the VFS.
+///
+/// # Returns
+///
+/// The on-disk `PathBuf` of the module's source file, or `None` if it could
+/// not be resolved.
 pub fn get_file_path_for_module(
     sema: &Semantics<ra_ap_ide::RootDatabase>,
     vfs: &Vfs,
@@ -77,6 +97,13 @@ pub fn get_file_path_for_module(
     }
 }
 
+/// Resolves a `ModuleDef` (struct, trait, function, etc.) to its source file
+/// path via the VFS.
+///
+/// # Returns
+///
+/// The `PathBuf` of the file containing the definition, or `None` if it could
+/// not be resolved.
 pub fn get_file_path_for_def(
     sema: &Semantics<ra_ap_ide::RootDatabase>,
     vfs: &Vfs,

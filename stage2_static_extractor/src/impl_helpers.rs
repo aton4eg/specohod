@@ -4,6 +4,13 @@ use ra_ap_syntax::ast;
 use crate::signature::format_function_signature;
 use crate::visibility::is_pub;
 
+/// Resolves the name of the struct type that an `impl` block targets,
+/// but only if the type is defined in the same module.
+///
+/// # Returns
+///
+/// The struct's name as a `String`, or `None` if `self_ty` is not a path
+/// type pointing to a struct in the current module.
 pub fn resolve_impl_self_type_name(
     sema: &Semantics<ra_ap_ide::RootDatabase>,
     current_module: ra_ap_hir::Module,
@@ -24,6 +31,15 @@ pub fn resolve_impl_self_type_name(
         .then(|| struct_def.name(sema.db).as_str().to_string())
 }
 
+/// Collects the formatted signatures of all public methods in an `impl` block.
+///
+/// # Parameters
+///
+/// * `i` — The `ast::Impl` node to scan.
+///
+/// # Returns
+///
+/// A vector of method signature strings.
 pub fn collect_public_methods_from_impl(i: &ast::Impl) -> Vec<String> {
     let Some(assoc_list) = i.assoc_item_list() else {
         return Vec::new();

@@ -26,6 +26,18 @@ pub struct Module {
     pub prelim_spec_path: PathBuf,
 }
 
+/// Walks the project directory and collects all `.rs` files that have
+/// corresponding `.deps.json` and `.facts.json` sidecar files.
+///
+/// Skips hidden directories and test/example directories.
+///
+/// # Parameters
+///
+/// * `root` — The project root directory.
+///
+/// # Returns
+///
+/// A list of `Module` records describing each module and its associated files.
 pub fn collect_modules(root: &Path) -> Result<Vec<Module>> {
     let mut modules = Vec::new();
     let root = root.canonicalize().context("Failed to canonicalize root")?;
@@ -65,6 +77,16 @@ pub fn collect_modules(root: &Path) -> Result<Vec<Module>> {
     Ok(modules)
 }
 
+/// Reads a `.deps.json` file and resolves all dependency paths, attempting
+/// both absolute and relative-to-deps-file resolution.
+///
+/// # Parameters
+///
+/// * `deps_path` — Path to the `.deps.json` file.
+///
+/// # Returns
+///
+/// A list of canonicalized `PathBuf`s for each dependency.
 pub fn read_dependencies(deps_path: &Path) -> Result<Vec<PathBuf>> {
     let content = std::fs::read_to_string(deps_path)
         .with_context(|| format!("Failed to read {:?}", deps_path))?;

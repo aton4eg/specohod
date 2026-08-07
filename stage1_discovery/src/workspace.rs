@@ -7,6 +7,16 @@ use rayon::prelude::*;
 use crate::types::WorkspaceGraph;
 use crate::utils::read_toml;
 
+/// Discovers the workspace structure by reading the root `Cargo.toml` and
+/// analyzing each member crate in parallel.
+///
+/// # Parameters
+///
+/// * `root` — Path to the workspace root directory.
+///
+/// # Returns
+///
+/// A `WorkspaceGraph` describing all crates and their module hierarchy.
 pub fn discover_workspace(root: &Path) -> Result<WorkspaceGraph> {
     let cargo =
         read_toml(&root.join("Cargo.toml")).context("Failed to read workspace Cargo.toml")?;

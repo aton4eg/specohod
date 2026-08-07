@@ -1,6 +1,16 @@
 use ra_ap_syntax::ast::{HasAttrs, HasName};
 use ra_ap_syntax::{AstNode, ast};
 
+/// Checks whether a syntax node is declared with any form of public visibility
+/// (`pub`, `pub(crate)`, or `pub(super)`).
+///
+/// # Parameters
+///
+/// * `node` — Any AST node that implements `HasVisibility`.
+///
+/// # Returns
+///
+/// `true` if the node has an explicit public visibility modifier.
 pub fn is_pub<N: ast::HasVisibility>(node: &N) -> bool {
     if let Some(vis) = node.visibility() {
         matches!(

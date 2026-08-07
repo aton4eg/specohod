@@ -6,6 +6,18 @@ use syn::{File, Item, ItemMod};
 use crate::types::ModuleInfo;
 use crate::utils::extract_path_attribute;
 
+/// Analyzes a single source file, parsing its AST and recursively resolving
+/// inline and file-level submodules.
+///
+/// # Parameters
+///
+/// * `file_path` — Path to the `.rs` file.
+/// * `crate_name` — Name of the owning crate.
+/// * `module_path` — Accumulated module path segments (e.g. `["crate", "foo"]`).
+///
+/// # Returns
+///
+/// A `ModuleInfo` describing the module's path and submodule tree.
 pub fn analyze_module(
     file_path: &Path,
     crate_name: &str,

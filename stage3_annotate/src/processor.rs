@@ -33,6 +33,10 @@ struct GenerationContext {
     module_index: HashMap<PathBuf, usize>,
 }
 
+/// Processes a strongly connected component of the dependency graph.
+///
+/// For non-cyclic SCCs (single module), generates a final spec directly.
+/// For cyclic SCCs, first generates preliminary specs, then final specs.
 async fn process_scc(
     scc_nodes: &[NodeIndex],
     modules: &[Module],
@@ -120,6 +124,18 @@ fn build_scc_deps(
     (dep_count, dependants)
 }
 
+/// Drives the full spec-generation pipeline: builds SCCs from the dependency
+/// graph, dispatches them in topological order with bounded concurrency, and
+/// unblocks dependants as each SCC completes.
+///
+/// # Parameters
+///
+/// * `graph` — The dependency graph (shared via `Arc`).
+/// * `modules` — All workspace modules (shared via `Arc`).
+/// * `prompts` — LLM prompt templates.
+/// * `llm_config` — LLM API configuration.
+/// * `stats` — Shared statistics accumulator.
+/// * `concurrency` — Maximum number of concurrent SCC tasks.
 pub async fn process_modules(
     graph: Arc<DiGraph<PathBuf, ()>>,
     modules: Arc<[Module]>,
@@ -177,8 +193,17 @@ pub async fn process_modules(
     let mut completed = 0;
     let mut errors: Vec<(usize, anyhow::Error)> = Vec::new();
 
-    loop {
-        // Dispatch as many ready SCCs as permits allow
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_ready_sccs(
+        ready_tx: &mpsc::UnboundedSender<usize>,
+        ready_rx: &mut mpsc::UnboundedReceiver<usize>,
+        dispatch_semaphore: &Arc<Semaphore>,
+        sccs: &[Vec<NodeIndex>],
+        ctx: &Arc<GenerationContext>,
+        modules: &Arc<[Module]>,
+        graph: &Arc<DiGraph<PathBuf, ()>>,
+        join_set: &mut JoinSet<(usize, Result<()>)>,
+    ) {
         loop {
             let scc_idx = match ready_rx.try_recv() {
                 Ok(idx) => idx,
@@ -189,7 +214,6 @@ pub async fn process_modules(
             let permit = match dispatch_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    // All permits in use — push back and wait for a completion
                     let _ = ready_tx.send(scc_idx);
                     break;
                 }
@@ -209,6 +233,19 @@ pub async fn process_modules(
                 (scc_idx, result)
             });
         }
+    }
+
+    loop {
+        dispatch_ready_sccs(
+            &ready_tx,
+            &mut ready_rx,
+            &dispatch_semaphore,
+            &sccs,
+            &ctx,
+            &modules,
+            &graph,
+            &mut join_set,
+        );
 
         let Some(result) = join_set.join_next().await else {
             if completed == total {

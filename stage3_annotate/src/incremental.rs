@@ -56,7 +56,16 @@ fn delete_partial_specs(module: &collector::Module) -> Result<()> {
     Ok(())
 }
 
-pub fn incremental_update(
+/// Performs an incremental update: hashes all source files, compares against
+/// previously stored hashes in spec files, and removes stale specs for changed
+/// modules and their transitive dependants.
+///
+/// # Parameters
+///
+/// * `modules` — All workspace modules.
+/// * `graph` — The dependency graph.
+/// * `node_map` — Map from file path to graph node index.
+pub fn run_incremental_update(
     modules: &[collector::Module],
     graph: &petgraph::graph::DiGraph<PathBuf, ()>,
     node_map: &HashMap<PathBuf, NodeIndex>,

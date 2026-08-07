@@ -7,10 +7,20 @@ use petgraph::graph::{DiGraph, NodeIndex};
 
 use crate::collector::{self, Module};
 
+/// Computes strongly connected components (SCCs) of the dependency graph in
+/// topological order using Tarjan's algorithm.
+///
+/// # Returns
+///
+/// A list of SCCs, where each SCC is a list of node indices.
 pub fn compute_topological_sccs(graph: &DiGraph<PathBuf, ()>) -> Vec<Vec<NodeIndex>> {
     tarjan_scc(graph)
 }
 
+/// Checks whether a strongly connected component is cyclic.
+///
+/// A single node with a self-loop or a group of multiple nodes is considered
+/// cyclic.
 pub fn is_cyclic_scc(graph: &DiGraph<PathBuf, ()>, nodes: &[NodeIndex]) -> bool {
     if nodes.len() > 1 {
         return true;
@@ -24,6 +34,15 @@ pub fn is_cyclic_scc(graph: &DiGraph<PathBuf, ()>, nodes: &[NodeIndex]) -> bool 
     false
 }
 
+/// Builds a directed dependency graph from a list of modules.
+///
+/// Each module becomes a node. Edges point from a module to each of its
+/// dependencies. External (non-workspace) dependencies are silently ignored.
+///
+/// # Returns
+///
+/// A tuple of `(graph, node_map)` where `node_map` maps file paths to their
+/// node indices.
 pub fn build_dependency_graph(
     modules: &[Module],
 ) -> Result<(DiGraph<PathBuf, ()>, HashMap<PathBuf, NodeIndex>)> {

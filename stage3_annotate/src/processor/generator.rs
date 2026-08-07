@@ -17,6 +17,22 @@ pub(super) struct DepData {
     pub(super) facts: String,
 }
 
+fn format_dep_sections(deps: &[DepData]) -> (String, String) {
+    let mut specs = String::new();
+    let mut facts = String::new();
+    for d in deps {
+        specs.push_str(&format!(
+            "\n--- Dependency spec: {:?} ---\n{}\n",
+            d.path, d.spec
+        ));
+        facts.push_str(&format!(
+            "\n--- Dependency facts: {:?} ---\n{}\n",
+            d.path, d.facts
+        ));
+    }
+    (specs, facts)
+}
+
 /// A generated partial specification kept in memory (path is retained only for
 /// the on-disk artifact and for logging).
 struct PartialSpec {
@@ -31,6 +47,14 @@ struct PartialSpecContext<'a> {
     generation: &'a GenerationContext,
 }
 
+/// Loads dependency data (facts and spec text) for all direct dependencies of
+/// a module. Falls back to preliminary specs if final specs are not yet
+/// available.
+///
+/// # Returns
+///
+/// A tuple of `(dep_data, prelim_flag)` where `prelim_flag` is `true` if any
+/// dependency only had a preliminary (not final) spec.
 pub(super) fn load_dep_data(
     module: &Module,
     all_modules: &[Module],
@@ -71,18 +95,7 @@ async fn generate_partial_specs_recursive(
     ctx: &PartialSpecContext<'_>,
     start_index: &mut u32,
 ) -> Result<Vec<PartialSpec>> {
-    let mut deps_specs = String::new();
-    let mut deps_facts = String::new();
-    for d in deps {
-        deps_specs.push_str(&format!(
-            "\n--- Dependency spec: {:?} ---\n{}\n",
-            d.path, d.spec
-        ));
-        deps_facts.push_str(&format!(
-            "\n--- Dependency facts: {:?} ---\n{}\n",
-            d.path, d.facts
-        ));
-    }
+    let (deps_specs, deps_facts) = format_dep_sections(deps);
 
     let mut vars = HashMap::with_capacity(5);
     vars.insert("module_code", ctx.code.to_string());
@@ -98,7 +111,7 @@ async fn generate_partial_specs_recursive(
     match ctx
         .generation
         .llm
-        .generate(&ctx.generation.prompts.system, &user_prompt)
+        .generate_completion(&ctx.generation.prompts.system, &user_prompt)
         .await
     {
         Ok(generated) => {
@@ -181,7 +194,10 @@ async fn generate_via_partial_merge(
     );
     let user_prompt = template::render_template(&ctx.prompts.merge, &vars);
 
-    let merged = ctx.llm.generate(&ctx.prompts.system, &user_prompt).await?;
+    let merged = ctx
+        .llm
+        .generate_completion(&ctx.prompts.system, &user_prompt)
+        .await?;
 
     write_spec_with_hash(output_path, &merged, code_hash)?;
     log::info!("Merged spec written to {:?}", output_path);
@@ -189,6 +205,17 @@ async fn generate_via_partial_merge(
     Ok(())
 }
 
+/// Generates a specification for a single module.
+///
+/// If the output file already exists, it is skipped. If the context length is
+/// exceeded, falls back to partial generation and merge.
+///
+/// # Parameters
+///
+/// * `module` — The module to generate a spec for.
+/// * `all_modules` — All workspace modules.
+/// * `output_path` — Where to write the generated spec.
+/// * `ctx` — Shared generation context with prompts and LLM client.
 pub(super) async fn generate_spec(
     module: &Module,
     all_modules: &[Module],
@@ -213,18 +240,7 @@ pub(super) async fn generate_spec(
 
     let (dep_data, prelim_flag) = load_dep_data(module, all_modules, ctx);
 
-    let mut deps_specs = String::new();
-    let mut deps_facts = String::new();
-    for d in &dep_data {
-        deps_specs.push_str(&format!(
-            "\n--- Dependency spec: {:?} ---\n{}\n",
-            d.path, d.spec
-        ));
-        deps_facts.push_str(&format!(
-            "\n--- Dependency facts: {:?} ---\n{}\n",
-            d.path, d.facts
-        ));
-    }
+    let (deps_specs, deps_facts) = format_dep_sections(&dep_data);
 
     let mut vars = HashMap::with_capacity(5);
     vars.insert("module_code", code.clone());
@@ -242,7 +258,11 @@ pub(super) async fn generate_spec(
         template::render_template(&ctx.prompts.final_spec, &vars)
     };
 
-    match ctx.llm.generate(&ctx.prompts.system, &user_prompt).await {
+    match ctx
+        .llm
+        .generate_completion(&ctx.prompts.system, &user_prompt)
+        .await
+    {
         Ok(generated) => {
             write_spec_with_hash(output_path, &generated, &code_hash)?;
             info!(

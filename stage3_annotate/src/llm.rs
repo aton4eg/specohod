@@ -4,7 +4,6 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use anyhow::Context;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -99,7 +98,22 @@ fn compute_retry_delay_ms(attempt: u32) -> u64 {
     (INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1)).min(30_000)
 }
 
+enum AttemptOutcome {
+    Success(String),
+    RetryableError,
+    FatalError(LlmError),
+}
+
 impl LlmClient {
+    /// Creates a new `LlmClient`.
+    ///
+    /// Builds an internal `reqwest::Client` with a 300-second timeout.
+    ///
+    /// # Parameters
+    ///
+    /// * `config` — LLM API configuration (base URL, API key, model, etc.).
+    /// * `stats` — Shared statistics counter.
+    /// * `semaphore` — Concurrency limiter for LLM requests.
     pub fn new(config: Config, stats: Arc<LlmStats>, semaphore: Arc<Semaphore>) -> Self {
         Self {
             config,
@@ -173,6 +187,70 @@ impl LlmClient {
         Ok(content)
     }
 
+    async fn execute_attempt(
+        &self,
+        url: &str,
+        request: &ChatRequest,
+        attempt: u32,
+        max_retries: u32,
+        system_prompt_len: usize,
+        user_prompt_len: usize,
+    ) -> AttemptOutcome {
+        let response = match self.send_request(url, request).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!(
+                    "LLM request network error (attempt {}/{}): {}",
+                    attempt,
+                    max_retries,
+                    e,
+                );
+                return AttemptOutcome::RetryableError;
+            }
+        };
+
+        let status = response.status();
+        Self::log_rate_limits(&response);
+
+        if status.is_success() {
+            let response_text = match response.text().await {
+                Ok(text) => text,
+                Err(e) => return AttemptOutcome::FatalError(LlmError::Other(e.into())),
+            };
+            match self
+                .parse_success_response(response_text, system_prompt_len, user_prompt_len)
+                .await
+            {
+                Ok(content) => return AttemptOutcome::Success(content),
+                Err(e) => return AttemptOutcome::FatalError(e),
+            }
+        }
+
+        let error_text = response.text().await.unwrap_or_default();
+        log::warn!(
+            "LLM request failed (attempt {}/{}): status {}, body: {}",
+            attempt,
+            max_retries,
+            status.as_u16(),
+            error_text,
+        );
+
+        if status == StatusCode::BAD_REQUEST && Self::is_context_length_error(&error_text) {
+            return AttemptOutcome::FatalError(LlmError::ContextLengthExceeded);
+        }
+
+        if Self::is_retryable_status(status) && attempt < max_retries {
+            AttemptOutcome::RetryableError
+        } else {
+            AttemptOutcome::FatalError(LlmError::Other(anyhow::anyhow!(
+                "LLM API error after {} attempts: {} - {}",
+                attempt,
+                status,
+                error_text,
+            )))
+        }
+    }
+
     async fn handle_retry_loop(
         &self,
         url: String,
@@ -185,78 +263,31 @@ impl LlmClient {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let response_result = self.send_request(&url, &request).await;
-
-            match response_result {
-                Ok(response) => {
-                    let status = response.status();
-                    Self::log_rate_limits(&response);
-
-                    if status.is_success() {
-                        let response_text = response
-                            .text()
-                            .await
-                            .context("Failed to read response body")
-                            .map_err(LlmError::Other)?;
-                        return self
-                            .parse_success_response(
-                                response_text,
-                                system_prompt_len,
-                                user_prompt_len,
-                            )
-                            .await;
-                    }
-
-                    let error_text = response.text().await.unwrap_or_default();
-                    log::warn!(
-                        "LLM request failed (attempt {}/{}): status {}, body: {}",
-                        attempt,
-                        MAX_RETRIES,
-                        status.as_u16(),
-                        error_text,
-                    );
-
-                    if status == StatusCode::BAD_REQUEST
-                        && Self::is_context_length_error(&error_text)
-                    {
-                        return Err(LlmError::ContextLengthExceeded);
-                    }
-
-                    if Self::is_retryable_status(status) && attempt < MAX_RETRIES {
-                        let delay = compute_retry_delay_ms(attempt);
-                        log::info!("Retrying after {} ms...", delay);
-                        sleep(Duration::from_millis(delay)).await;
-                        continue;
-                    }
-
-                    return Err(LlmError::Other(anyhow::anyhow!(
-                        "LLM API error after {} attempts: {} - {}",
-                        attempt,
-                        status,
-                        error_text,
-                    )));
+            match self
+                .execute_attempt(
+                    &url,
+                    &request,
+                    attempt,
+                    MAX_RETRIES,
+                    system_prompt_len,
+                    user_prompt_len,
+                )
+                .await
+            {
+                AttemptOutcome::Success(result) => return Ok(result),
+                AttemptOutcome::RetryableError => {
+                    let delay = compute_retry_delay_ms(attempt);
+                    log::info!("Retrying after {} ms...", delay);
+                    sleep(Duration::from_millis(delay)).await;
+                    continue;
                 }
-                Err(e) => {
-                    log::warn!(
-                        "LLM request network error (attempt {}/{}): {}",
-                        attempt,
-                        MAX_RETRIES,
-                        e,
-                    );
-                    if attempt < MAX_RETRIES {
-                        let delay = compute_retry_delay_ms(attempt);
-                        log::info!("Retrying after {} ms...", delay);
-                        sleep(Duration::from_millis(delay)).await;
-                        continue;
-                    }
-                    return Err(LlmError::Other(
-                        anyhow::Error::new(e).context("LLM request failed after retries"),
-                    ));
-                }
+                AttemptOutcome::FatalError(e) => return Err(e),
             }
         }
     }
 
+    /// Logs rate-limit headers (`x-ratelimit-remaining-requests` and
+    /// `x-ratelimit-remaining-tokens`) from an LLM API response at debug level.
     fn log_rate_limits(response: &reqwest::Response) {
         if let Some(remaining) = response.headers().get("x-ratelimit-remaining-requests") {
             log::debug!("RateLimit remaining requests: {:?}", remaining);
@@ -266,12 +297,16 @@ impl LlmClient {
         }
     }
 
+    /// Checks whether an error text indicates that the context length was
+    /// exceeded by matching known error message patterns.
     fn is_context_length_error(error_text: &str) -> bool {
         let lower = error_text.to_lowercase();
         lower.contains("exceeds the model's maximum context length")
             || lower.contains("is longer than the model's context length")
     }
 
+    /// Returns `true` if an HTTP status code indicates a transient error that
+    /// can be retried (429, 500, 502, 503, 504).
     fn is_retryable_status(status: StatusCode) -> bool {
         matches!(
             status,
@@ -283,7 +318,20 @@ impl LlmClient {
         )
     }
 
-    pub async fn generate(
+    /// Sends a chat completion request to the LLM API with system and user
+    /// prompts. Acquires a semaphore permit before sending.
+    ///
+    /// Automatically retries on transient errors with exponential backoff.
+    ///
+    /// # Parameters
+    ///
+    /// * `system_prompt` — The system-level prompt text.
+    /// * `user_prompt` — The user-level prompt text.
+    ///
+    /// # Returns
+    ///
+    /// The generated completion text, or an `LlmError` on failure.
+    pub async fn generate_completion(
         &self,
         system_prompt: &str,
         user_prompt: &str,

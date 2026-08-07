@@ -1,5 +1,18 @@
 use ra_ap_hir::{Adt, ModuleDef, Semantics};
 
+/// Computes the fully-qualified module path (e.g. `crate::foo::bar`) for
+/// a given `ra_ap_hir::Module`.
+///
+/// Walks the module's ancestry from root to the module itself.
+///
+/// # Parameters
+///
+/// * `sema` — rust-analyzer `Semantics`.
+/// * `module` — The HIR module to resolve.
+///
+/// # Returns
+///
+/// The module path as a `String`, joined by `::`.
 pub fn get_absolute_module_path(
     sema: &Semantics<ra_ap_ide::RootDatabase>,
     module: ra_ap_hir::Module,
@@ -27,6 +40,12 @@ pub fn get_absolute_module_path(
     }
 }
 
+/// Resolves a `ModuleDef` to its canonical module path string.
+///
+/// # Returns
+///
+/// The fully-qualified path for modules, ADTs, traits, and functions;
+/// `None` for unsupported definition kinds.
 pub fn get_canonical_path(
     sema: &Semantics<ra_ap_ide::RootDatabase>,
     def: ModuleDef,

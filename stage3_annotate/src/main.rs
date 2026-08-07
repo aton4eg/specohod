@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
     let (graph, node_map) = graph::build_dependency_graph(&modules)?;
 
     if args.incremental {
-        incremental::incremental_update(&modules, &graph, &node_map)?;
+        incremental::run_incremental_update(&modules, &graph, &node_map)?;
     }
 
     let prompts = load_prompts(&args)?;
