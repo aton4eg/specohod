@@ -1,12 +1,11 @@
 [workspace]
 resolver = "3"
 
-members = ["stage1_discovery", "stage2_static_extractor", "stage3_annotate"]
+members = ["stage1_static_extractor", "stage2_annotate"]
 
 default-members = [
-    "stage1_discovery",
-    "stage2_static_extractor",
-    "stage3_annotate",
+    "stage1_static_extractor",
+    "stage2_annotate",
 ]
 
 [workspace.package]

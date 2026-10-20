@@ -1,0 +1,7 @@
+I am providing you with the dependency specifications and the specification of the module that depends on them. The dependency specifications have been modified. You must review these changes against the module specification or reply with the single word "NO" if the changes do not alter the facts described in the module specification. Otherwise, you must revise the original module specification in your reply to align it with the dependency changes. Making any other changes is prohibited. It is strongly recommended to base your response on the original specification text.
+
+--- Changed specifications of dependencies---
+{{dep_spec}}
+
+--- The module specification ---
+{{old_spec}}

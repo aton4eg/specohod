@@ -1,7 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
+    fs::exists,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{Context, Result};
@@ -12,6 +13,34 @@ use petgraph::Direction;
 use petgraph::graph::NodeIndex;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
+
+// ============================================================
+// NEW: economy state shared across processor
+// ============================================================
+pub struct EconomyState {
+    pub update_prompt: String,
+    pub dirty: Mutex<HashSet<PathBuf>>,
+}
+
+impl EconomyState {
+    pub fn new(update_prompt: String, changed: HashSet<PathBuf>) -> Self {
+        Self {
+            update_prompt,
+            dirty: Mutex::new(HashSet::new()),
+        }
+    }
+
+    pub fn is_dirty(&self, path: &std::path::Path) -> bool {
+        self.dirty.lock().unwrap().contains(path)
+    }
+    pub fn mark_dirty(&self, path: &std::path::Path) {
+        self.dirty.lock().unwrap().insert(path.to_path_buf());
+    }
+    pub fn any_dep_affected(&self, deps: &[PathBuf]) -> bool {
+        let d = self.dirty.lock().unwrap();
+        deps.iter().any(|p| d.contains(p))
+    }
+}
 
 mod processor {
     use std::collections::HashMap;
@@ -28,7 +57,7 @@ mod processor {
     use crate::template;
 
     // Hashing utilities (defined above in main.rs, but used here too)
-    use crate::{compute_hash, write_spec_with_hash};
+    use crate::{EconomyState, compute_hash, write_spec_with_hash};
 
     struct DepData {
         path: PathBuf,
@@ -48,6 +77,7 @@ mod processor {
     struct GenerationContext<'a> {
         prompts: Prompts<'a>,
         llm: &'a LlmClient,
+        economy: Option<&'a EconomyState>,
     }
 
     struct PartialSpecContext<'a> {
@@ -55,6 +85,18 @@ mod processor {
         facts: &'a str,
         base_path: &'a Path,
         generation: &'a GenerationContext<'a>,
+    }
+
+    // ---------- helpers ----------
+    /// Strip the leading hash comment from a spec body (for update).
+    fn strip_hash_line(spec: &str) -> String {
+        let mut lines = spec.lines();
+        if let Some(first) = lines.next() {
+            if first.trim_start().starts_with("<!-- SPEC_HASH:") {
+                return lines.collect::<Vec<_>>().join("\n");
+            }
+        }
+        spec.to_string()
     }
 
     /// Recursively generates partial specs, splitting dependencies in half on context overflow.
@@ -174,7 +216,7 @@ mod processor {
                 if let (Some(spec), Some(facts)) = (spec, facts) {
                     dep_data_list.push(DepData {
                         path: dep_path,
-                        spec,
+                        spec: strip_hash_line(&spec),
                         facts,
                     });
                 }
@@ -196,8 +238,11 @@ mod processor {
         for p in &partial_paths {
             let content = std::fs::read_to_string(p)
                 .with_context(|| format!("Failed to read partial spec {:?}", p))?;
-            partial_specs_content
-                .push_str(&format!("\n--- Partial spec: {:?} ---\n{}\n", p, content));
+            partial_specs_content.push_str(&format!(
+                "\n--- Partial spec: {:?} ---\n{}\n",
+                p,
+                strip_hash_line(&content)
+            ));
         }
 
         let mut vars = HashMap::new();
@@ -215,6 +260,14 @@ mod processor {
         // Insert hash and write
         write_spec_with_hash(output_path, &merged, code_hash)?;
         log::info!("Merged spec written to {:?}", output_path);
+
+        for path in partial_paths {
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("Failed to remove {:?}", path))?;
+                info!("Removed partial spec: {:?}", path);
+            }
+        }
 
         Ok(())
     }
@@ -271,7 +324,8 @@ mod processor {
                 if let Some(spec) = spec_content {
                     deps_specs.push_str(&format!(
                         "\n--- Dependency spec: {:?} ---\n{}\n",
-                        dep_path, spec
+                        dep_path,
+                        strip_hash_line(&spec)
                     ));
                 }
             }
@@ -323,6 +377,148 @@ mod processor {
         }
     }
 
+    // ---------- compare-specs ----------
+
+    /// Ask LLM whether two spec bodies are semantically equivalent.
+    /// Returns true for "yes", false for "no".
+    /// Retries up to 10 times on ambiguous answers. Bails out after 10 failures.
+    async fn update_specs(
+        ctx: &GenerationContext<'_>,
+        old_spec: &str,
+        dep_spec: &str,
+    ) -> Option<String> {
+        let economy = ctx.economy.unwrap();
+
+        let mut vars = HashMap::new();
+        vars.insert("old_spec", old_spec.to_string());
+        vars.insert("dep_spec", dep_spec.to_string());
+
+        let mut last_response = String::new();
+        for attempt in 1..=10 {
+            let user_prompt = template::render(&economy.update_prompt, &vars);
+            match ctx.llm.generate(ctx.prompts.system, &user_prompt).await {
+                Ok(response) => {
+                    last_response = response.clone();
+                    let last_word = response
+                        .trim()
+                        .split_whitespace()
+                        .last()
+                        .unwrap_or("")
+                        .trim_matches(|c: char| !c.is_alphabetic())
+                        .to_lowercase();
+
+                    if last_word == "no" || last_word == "нет" {
+                        return None;
+                    }
+                    return Some(response);
+                }
+                Err(e) => {
+                    log::warn!("Compare-spec attempt {}/10 failed: {:?}", attempt, e);
+                    return None;
+                }
+            }
+        }
+        return None;
+    }
+
+    // ---------- outcome enum ----------
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SpecOutcome {
+        Skipped,
+        Unchanged,
+        Changed,
+    }
+
+    // ---------- economy-aware generation ----------
+
+    /// Generates spec for `output_path` in economy mode.
+    /// - module changed -> normal rebuild; dirty.
+    /// - module affected (dep dirty) but not changed -> build .new and decide whether it should be propagated further
+    /// - module unaffected -> skip.
+    async fn generate_spec_with_economy(
+        module: &Module,
+        modules: &[Module],
+        ctx: &GenerationContext<'_>,
+        output_path_old: &Path,
+        output_path_new: &Path,
+        prelim: bool,
+    ) -> Result<SpecOutcome> {
+        info!(
+            "start economy generation for {}",
+            module.file_path.as_os_str().display()
+        );
+
+        if output_path_new.exists() {
+            info!("skip generation, new spec exists");
+            return Ok(SpecOutcome::Skipped);
+        }
+
+        let economy = ctx.economy.as_ref().unwrap();
+        let deps = crate::collector::read_dependencies(&module.deps_path)?;
+        let dep_affected = economy.any_dep_affected(&deps);
+        let missing_spec = !module.spec_path.exists();
+
+        if !dep_affected && !missing_spec {
+            info!("Economy: skip (unaffected) {:?}", module.file_path);
+            return Ok(SpecOutcome::Skipped);
+        }
+
+        let economy = ctx.economy.expect("economy context");
+
+        let code = std::fs::read_to_string(&module.file_path)
+            .with_context(|| format!("Failed to read {:?}", module.file_path))?;
+
+        if missing_spec {
+            info!("Economy: rebuild (changed/new) {:?}", module.file_path);
+            generate_spec(module, modules, &output_path_old, ctx).await?;
+            economy.mark_dirty(&module.file_path);
+            return Ok(SpecOutcome::Changed);
+        }
+
+        // Affected but not changed -> build .new, compare
+        info!("Economy: affected (compare) {:?}", module.file_path);
+
+        let old_raw = std::fs::read_to_string(output_path_old)
+            .with_context(|| format!("Failed to read {:?}", output_path_old))?;
+        let old_body = strip_hash_line(&old_raw);
+
+        let mut dep_specs = String::new();
+
+        let deps = crate::collector::read_dependencies(&module.deps_path)?;
+        for dep_path in deps {
+            if economy.is_dirty(&dep_path) {
+                if let Some(dep_module) = modules.iter().find(|m| m.file_path == dep_path) {
+                    let spec_content = if prelim {
+                        std::fs::read_to_string(&dep_module.prelim_spec_path).unwrap()
+                    } else {
+                        std::fs::read_to_string(&dep_module.spec_path).unwrap()
+                    };
+                    dep_specs += &spec_content;
+                }
+            }
+        }
+
+        let response = update_specs(ctx, &old_body, &dep_specs).await;
+
+        if let Some(spec) = response {
+            let code_hash = compute_hash(&code);
+            write_spec_with_hash(output_path_new, &spec, &code_hash)?;
+            economy.mark_dirty(&module.file_path);
+            info!(
+                "Economy: spec {:?} will get updates, propagation continues",
+                module.file_path
+            );
+            Ok(SpecOutcome::Changed)
+        } else {
+            info!(
+                "Economy: spec {:?} unchanged, propagation stops",
+                module.file_path
+            );
+            Ok(SpecOutcome::Unchanged)
+        }
+    }
+
     /// Counts module's "horizontal" dependencies.
     fn count_horizontal_deps(module: &Module, all_modules: &[Module]) -> Result<usize> {
         let deps = crate::collector::read_dependencies(&module.deps_path)?;
@@ -356,10 +552,23 @@ mod processor {
 
         let is_cyclic = crate::graph::is_cyclic_scc(graph, scc_nodes);
 
+        // --- non-cyclic ---
         if !is_cyclic {
             let module = scc_modules[0];
-            generate_spec(module, modules, &module.spec_path, ctx).await?;
-            log::info!("Generated final spec for {:?}", module.file_path);
+            if ctx.economy.is_some() {
+                generate_spec_with_economy(
+                    module,
+                    modules,
+                    ctx,
+                    &module.spec_path,
+                    &module.new_spec_path,
+                    false,
+                )
+                .await?;
+            } else {
+                generate_spec(module, modules, &module.spec_path, ctx).await?;
+                log::info!("Generated final spec for {:?}", module.file_path);
+            }
             return Ok(());
         }
 
@@ -372,16 +581,44 @@ mod processor {
         }
         ordered_modules.sort_by_key(|(_, cnt)| *cnt);
 
-        // Stage 1: preliminary specifications
-        for (module, _) in &ordered_modules {
-            generate_spec(module, modules, &module.prelim_spec_path, ctx).await?;
-            log::info!("Generated preliminary spec for {:?}", module.file_path);
-        }
+        // --- non-economy: legacy flow ---
+        if ctx.economy.is_none() {
+            // Stage 1: preliminary specifications
+            for (module, _) in &ordered_modules {
+                generate_spec(module, modules, &module.prelim_spec_path, ctx).await?;
+                log::info!("Generated preliminary spec for {:?}", module.file_path);
+            }
 
-        // Stage 2: final specifications
-        for (module, _) in &ordered_modules {
-            generate_spec(module, modules, &module.spec_path, ctx).await?;
-            log::info!("Generated final spec for {:?}", module.file_path);
+            // Stage 2: final specifications
+            for (module, _) in &ordered_modules {
+                generate_spec(module, modules, &module.spec_path, ctx).await?;
+                log::info!("Generated final spec for {:?}", module.file_path);
+            }
+            return Ok(());
+        } else {
+            for (module, _) in &ordered_modules {
+                generate_spec_with_economy(
+                    module,
+                    modules,
+                    ctx,
+                    &module.prelim_spec_path,
+                    &module.new_prelim_spec_path,
+                    true,
+                )
+                .await?;
+            }
+
+            for (module, _) in &ordered_modules {
+                generate_spec_with_economy(
+                    module,
+                    modules,
+                    ctx,
+                    &module.spec_path,
+                    &module.new_spec_path,
+                    false,
+                )
+                .await?;
+            }
         }
 
         Ok(())
@@ -393,16 +630,27 @@ mod processor {
         prompts: Prompts<'_>,
         llm_config: &Config,
         stats: Arc<LlmStats>,
+        economy: Option<&EconomyState>,
     ) -> Result<()> {
         let llm_client = Arc::new(LlmClient::new(llm_config.clone(), stats.clone()));
         let generation_ctx = GenerationContext {
             prompts,
             llm: &llm_client,
+            economy,
         };
         let sccs = crate::graph::topological_sccs(graph);
 
         for scc in sccs {
             process_scc(&scc, modules, graph, &generation_ctx).await?;
+        }
+
+        for module in modules {
+            if module.new_prelim_spec_path.exists() {
+                std::fs::rename(&module.new_prelim_spec_path, &module.prelim_spec_path);
+            }
+            if module.new_prelim_spec_path.exists() {
+                std::fs::rename(&module.new_spec_path, &module.spec_path);
+            }
         }
 
         Ok(())
@@ -879,6 +1127,8 @@ mod collector {
         pub facts_path: PathBuf,
         pub spec_path: PathBuf,
         pub prelim_spec_path: PathBuf,
+        pub new_spec_path: PathBuf,
+        pub new_prelim_spec_path: PathBuf,
     }
 
     pub fn collect_modules(root: &Path) -> Result<Vec<Module>> {
@@ -902,6 +1152,8 @@ mod collector {
                 let facts_path = rs_path.with_extension("facts.json");
                 let spec_path = rs_path.with_extension("spec.md");
                 let prelim_spec_path = rs_path.with_extension("preliminary.spec.md");
+                let new_spec_path = rs_path.with_extension("spec.new.md");
+                let new_prelim_spec_path = rs_path.with_extension("preliminary.spec.new.md");
 
                 if deps_path.exists() && facts_path.exists() {
                     modules.push(Module {
@@ -910,6 +1162,8 @@ mod collector {
                         facts_path,
                         spec_path,
                         prelim_spec_path,
+                        new_spec_path,
+                        new_prelim_spec_path,
                     });
                 }
             }
@@ -1015,6 +1269,58 @@ fn delete_partial_specs(module: &collector::Module) -> Result<()> {
     Ok(())
 }
 
+/// Compute set of modules whose code hash differs from the hash in the existing spec.
+fn compute_changed_set(modules: &[collector::Module]) -> Result<HashSet<PathBuf>> {
+    let mut changed = HashSet::new();
+    for module in modules {
+        let code = std::fs::read_to_string(&module.file_path)
+            .with_context(|| format!("Failed to read {:?}", module.file_path))?;
+        let current_hash = compute_hash(&code);
+
+        let need_update = if module.spec_path.exists() {
+            match extract_hash_from_spec(&module.spec_path) {
+                Some(saved_hash) => saved_hash != current_hash,
+                None => true,
+            }
+        } else {
+            true
+        };
+
+        if need_update {
+            changed.insert(module.file_path.clone());
+        }
+    }
+    Ok(changed)
+}
+
+/// Delete final + preliminary specs (and partials) only for the given set.
+fn delete_changed_specs(modules: &[collector::Module], changed: &HashSet<PathBuf>) -> Result<()> {
+    for module in modules {
+        if changed.contains(&module.file_path) {
+            if module.spec_path.exists() {
+                std::fs::remove_file(&module.spec_path)
+                    .with_context(|| format!("Failed to remove {:?}", module.spec_path))?;
+            }
+            if module.prelim_spec_path.exists() {
+                std::fs::remove_file(&module.prelim_spec_path)
+                    .with_context(|| format!("Failed to remove {:?}", module.prelim_spec_path))?;
+            }
+            delete_partial_specs(module)?;
+        }
+    }
+    Ok(())
+}
+
+/// Delete final + preliminary specs (and partials) only for the given set.
+fn propagate_affected_set(modules: &[collector::Module], economy_state: &EconomyState) {
+    for m in modules {
+        if m.new_prelim_spec_path.exists() || m.new_spec_path.exists() {
+            economy_state.mark_dirty(&m.file_path);
+        }
+    }
+}
+
+/// Legacy non-economy incremental update.
 fn incremental_update(
     modules: &[collector::Module],
     graph: &petgraph::graph::DiGraph<PathBuf, ()>,
@@ -1139,6 +1445,18 @@ struct Args {
     /// Enable incremental updates: regenerate only changed modules and their dependents.
     #[arg(long)]
     incremental: bool,
+
+    // NEW: incremental economy
+    /// Enable incremental economy mode: regenerate only changed modules.
+    /// Dependents are only rebuilt if their new spec differs from the old one
+    /// (checked via --update_spec_prompt).
+    #[arg(long)]
+    incremental_economy: bool,
+
+    // NEW: prompt used to compare old vs new spec.
+    /// Prompt template for comparing two specs. Must contain {{old_spec}} and {{new_spec}}.
+    #[arg(long, default_value = "prompts/update_spec.txt")]
+    update_spec_prompt: PathBuf,
 }
 
 #[tokio::main]
@@ -1153,8 +1471,29 @@ async fn main() -> Result<()> {
     info!("Building dependency graph");
     let (graph, node_map) = graph::build_dependency_graph(&modules)?;
 
-    // Incremental update: delete outdated specs
-    if args.incremental {
+    // --- economy state (optional) ---
+    let economy_state: Option<Arc<EconomyState>> = if args.incremental_economy {
+        let update_prompt =
+            std::fs::read_to_string(&args.update_spec_prompt).with_context(|| {
+                format!("Failed to read update prompt {:?}", args.update_spec_prompt)
+            })?;
+        let changed = compute_changed_set(&modules)?;
+        info!(
+            "Economy: {} changed modules detected, deleting their specs",
+            changed.len()
+        );
+        delete_changed_specs(&modules, &changed)?;
+        Some(Arc::new(EconomyState::new(update_prompt, changed)))
+    } else {
+        None
+    };
+
+    if let Some(ec) = economy_state.as_deref() {
+        propagate_affected_set(&modules, ec);
+    }
+
+    // Legacy --incremental still works (mutually exclusive in practice).
+    if args.incremental && !args.incremental_economy {
         incremental_update(&modules, &graph, &node_map)?;
     }
 
@@ -1189,6 +1528,7 @@ async fn main() -> Result<()> {
         },
         &llm_config,
         stats.clone(),
+        economy_state.as_deref(),
     )
     .await?;
 

@@ -1,0 +1,29 @@
+Build a markdown specification according to the template.
+You are given the following in the context:
+
+The source code of the module for which the specification is being built; this file exists.
+
+A *.facts.json file listing the public interfaces of this module; this file exists.
+
+Ready-made specifications of the modules on which the analyzed module depends; these are all present.
+
+*.facts.json files of the modules on which the analyzed module depends, listing the public interfaces of those modules; these are all present.
+
+A specification template; this file exists.
+
+The essence of your work is that you are participating in covering a large software project, consisting of many modules, with a layer of specifications. In this specific case, all dependencies have ready-made specifications. Using all the provided context, generate a single final specification for the entire module.
+
+==CODE OF THE ANALYZED MODULE==
+{{module_code}}
+
+==JSON WITH PUBLIC INTERFACES OF THE ANALYZED MODULE==
+{{module_pub_interfaces}}
+
+==SPECIFICATIONS OF MODULES ON WHICH THE ANALYZED MODULE DEPENDS==
+{{specifications_of_module_dependencies}}
+
+==JSON WITH PUBLIC INTERFACES OF MODULES ON WHICH THE ANALYZED MODULE DEPENDS==
+{{public_interfaces_of_dependencies}}
+
+==SPECIFICATION TEMPLATE==
+{{specification_template}}

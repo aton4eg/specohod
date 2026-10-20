@@ -1,5 +1,5 @@
 [package]
-name = "stage2_static_extractor"
+name = "stage1_static_extractor"
 version = "0.1.0"
 edition = "2024"
 

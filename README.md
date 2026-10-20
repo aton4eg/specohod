@@ -1,10 +1,8 @@
 # A set of utilities for covering Rust projects with precise specification layer
 
-* `stage1_discovery` builds a nesting graph. Not necessary.
+* `stage1_static_extractor` builds metadata for each `.rs` file — a list of dependencies in `.deps.json` and a set of public interfaces in `.facts.json`. 
 
-* `stage2_static_extractor` builds metadata for each `.rs` file — a list of dependencies in `.deps.json` and a set of public interfaces in `.facts.json`. 
-
-* `stage3_annotate` builds a dependency graph and, traversing from leaves via topological sorting, invokes an LLM to generate a specification. 
+* `stage2_annotate` builds a dependency graph and, traversing from leaves via topological sorting, invokes an LLM to generate a specification. 
   The context consists of: 
     *   The `.rs` file code, 
     *   the `facts.json` of its dependencies, 
@@ -14,16 +12,11 @@
     Additionally, a separate folder contains prompts for Kilocode so that it can start perceiving these specifications. 
     The prompts should replace the system prompts for the roles.
 
-## Example `stage1_discovery` run
-`cargo run --release -- /path/to/your/rust/project/ > /home/username/graph.json`
-
-
-## Example `stage2_static_extractor` run
+## Example `stage1_static_extractor` run
 `cargo run --release -- --manifest /path/to/your/rust/project/Cargo.toml`
 
-
-## Example `stage3_annotate` run
-`cargo run --release -- --root /path/to/your/rust/project --api-key <your_api_key> --api_base <your_api_address> --model <your_model>`
+## Example `stage2_annotate` run
+`cargo run --release -- --root /path/to/your/rust/project --api-key <your_api_key> --api-base <your_api_address> --model <your_model>`
 
 ## Notes
 
@@ -35,6 +28,8 @@ When working with a project, I recommend creating a guidebook using the Ask role
 
 At the beginning of a Kilocode session, it is recommended to add `guidebook.md` to the context.
 
-By default `stage3_annotate` is configured for ~200k token window with temperature 0.0.
+By default `stage2_annotate` is configured for ~200k token window with temperature 0.0.
 
-Tool also supports `incremental` mode whick tracks changed source files and recirsively rebuilds specs for it and all it's consumers.
+Tool also supports `incremental` mode which tracks changed source files and recirsively rebuilds specs for it and all it's consumers.
+
+Tool also supports `incremental-economy` mode which tracks changed source files and rebuilds the only specs impacted by the change.

@@ -1,0 +1,27 @@
+Build a markdown partial specification according to the template.
+You are given the following in the context:
+
+The source code of the module for which the specification is being built; this file exists.
+
+A *.facts.json file listing the public interfaces of this module; this file exists.
+
+A subset of the dependencies' specifications and facts. Only a subset is provided because the full set did not fit in the context window. Other partial specifications for the remaining dependencies are being built separately.
+
+A specification template; this file exists.
+
+The essence of your work is that you are participating in covering a large software project, consisting of many modules, with a layer of specifications. In this specific case, the module's dependencies are split into groups, and you receive one group. Build a partial specification for the module based on this subset. All partial specifications will later be merged into one final specification.
+
+==CODE OF THE ANALYZED MODULE==
+{{module_code}}
+
+==JSON WITH PUBLIC INTERFACES OF THE ANALYZED MODULE==
+{{module_pub_interfaces}}
+
+==SPECIFICATIONS OF THE MODULES ON WHICH THE ANALYZED MODULE DEPENDS==
+{{specifications_of_module_dependencies}}
+
+==JSON WITH PUBLIC INTERFACES OF THE MODULES ON WHICH THE ANALYZED MODULE DEPENDS==
+{{public_interfaces_of_dependencies}}
+
+==SPECIFICATION TEMPLATE==
+{{specification_template}}
